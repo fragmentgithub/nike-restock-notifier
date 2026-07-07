@@ -24,6 +24,7 @@ const lastChecked = document.querySelector('#lastChecked');
 const nextCheck = document.querySelector('#nextCheck');
 const sizeRows = document.querySelector('#sizeRows');
 const eventLog = document.querySelector('#eventLog');
+const pagesLinks = document.querySelector('#pagesLinks');
 
 let state = null;
 let staticMode = false;
@@ -224,8 +225,9 @@ function render(nextState) {
   runStatus.textContent = staticMode ? 'Pages版' : config.running ? '監視中' : '停止中';
   runStatus.className = `status-pill ${config.running || staticMode ? 'running' : ''}`;
 
-  checkStatus.textContent = staticMode ? '公開中' : state.checking ? '確認中' : state.lastError ? 'エラー' : '待機中';
-  checkStatus.className = `small-status ${state.lastError ? 'error' : state.checking ? '' : 'ok'}`;
+  const stale = staticMode && isStaticStatusStale(state, config);
+  checkStatus.textContent = staticMode ? (stale ? '遅延' : '公開中') : state.checking ? '確認中' : state.lastError ? 'エラー' : '待機中';
+  checkStatus.className = `small-status ${state.lastError || stale ? 'error' : state.checking ? '' : 'ok'}`;
 
   if (result?.product) {
     productTitle.textContent = result.product.title || 'Nike product';
@@ -246,7 +248,7 @@ function render(nextState) {
 
   stockStatus.textContent = result?.statusLabel || '未確認';
   lastChecked.textContent = result?.checkedAt ? formatDate(result.checkedAt) : state.pagesUpdatedAt ? formatDate(state.pagesUpdatedAt) : '-';
-  nextCheck.textContent = state.nextCheckAt ? formatDate(state.nextCheckAt) : staticMode ? '-' : '-';
+  nextCheck.textContent = nextCheckText(state, config);
   renderSizes(result?.sizes || []);
   renderEvents(state.events || []);
   setStaticControls();
@@ -309,6 +311,10 @@ function setBusy(isBusy) {
 }
 
 function setStaticControls() {
+  if (pagesLinks) {
+    pagesLinks.hidden = !staticMode;
+  }
+
   for (const input of [productUrlInput, sizeFiltersInput, intervalInput, discordWebhookInput]) {
     input.disabled = staticMode;
   }
@@ -316,6 +322,30 @@ function setStaticControls() {
   for (const button of [saveButton, startButton, stopButton, checkButton, testDiscordButton]) {
     button.disabled = staticMode;
   }
+}
+
+function nextCheckText(currentState, config) {
+  if (currentState.nextCheckAt) return formatDate(currentState.nextCheckAt);
+  if (!staticMode) return '-';
+
+  const intervalSeconds = Number(config.intervalSeconds || 300);
+  const lastCheckedAt = currentState.lastResult?.checkedAt || currentState.pagesUpdatedAt;
+  if (lastCheckedAt) {
+    const next = new Date(new Date(lastCheckedAt).getTime() + intervalSeconds * 1000);
+    if (next.getTime() > Date.now()) {
+      return `約${formatDate(next.toISOString())}`;
+    }
+  }
+
+  return `${Math.max(1, Math.round(intervalSeconds / 60))}分ごと`;
+}
+
+function isStaticStatusStale(currentState, config) {
+  const lastCheckedAt = currentState.lastResult?.checkedAt || currentState.pagesUpdatedAt;
+  if (!lastCheckedAt) return false;
+
+  const intervalSeconds = Number(config.intervalSeconds || 300);
+  return Date.now() - new Date(lastCheckedAt).getTime() > intervalSeconds * 3 * 1000;
 }
 
 function showToast(message) {

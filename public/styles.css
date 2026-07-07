@@ -193,6 +193,36 @@ input:focus {
   line-height: 1.5;
 }
 
+.pages-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.pages-links[hidden] {
+  display: none;
+}
+
+.pages-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: #fff;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.pages-links a:hover {
+  border-color: #8f8a7d;
+  text-decoration: none;
+}
+
 .status-pill,
 .small-status {
   min-width: 86px;
