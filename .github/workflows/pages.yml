@@ -1,0 +1,70 @@
+name: Nike Restock Monitor and Pages
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  monitor-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Restore monitor state
+        uses: actions/cache/restore@v4
+        with:
+          path: .monitor-state
+          key: nike-monitor-state-${{ github.run_id }}
+          restore-keys: |
+            nike-monitor-state-
+
+      - name: Check Nike stock
+        env:
+          PRODUCT_URL: ${{ vars.PRODUCT_URL }}
+          SIZE_FILTERS: ${{ vars.SIZE_FILTERS }}
+          INTERVAL_SECONDS: ${{ vars.INTERVAL_SECONDS }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: node scripts/monitor.js
+
+      - name: Save monitor state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .monitor-state
+          key: nike-monitor-state-${{ github.run_id }}
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

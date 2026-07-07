@@ -1,0 +1,110 @@
+{
+  "updatedAt": "2026-07-07T14:47:09.256Z",
+  "config": {
+    "productUrl": "https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005",
+    "sizeFilters": "",
+    "intervalSeconds": 300,
+    "discordWebhookSet": false
+  },
+  "lastResult": {
+    "product": {
+      "title": "Nike Mind 001 メンズ プレゲーム⁠ ミュール",
+      "subtitle": "メンズ プレゲーム ミュール",
+      "styleColor": "HQ4307-005",
+      "url": "https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005",
+      "imageUrl": "https://static.nike.com/a/images/t_default/u_9ddf04c7-2a9a-4d76-add1-d15af8f0263d,c_scale,fl_relative,w_1.0,h_1.0,fl_layer_apply/84f0e0b9-bcd1-48f4-abd3-7faf8a3836f9/NIKE+MIND+001.png",
+      "price": "￥13,200"
+    },
+    "sizes": [
+      {
+        "id": "b7daa26b-b2bd-58fc-a54f-4fbda694ab95",
+        "label": "24 (US 6)",
+        "localizedSize": "24 (US 6)",
+        "nikeSize": "6",
+        "size": "6",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "c725acd4-705d-583b-9806-ef00e67f66b7",
+        "label": "25",
+        "localizedSize": "25",
+        "nikeSize": "7",
+        "size": "7",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "240d6850-da6c-58e7-bfb2-ad14f6447d2d",
+        "label": "26",
+        "localizedSize": "26",
+        "nikeSize": "8",
+        "size": "8",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "a3d1e5b0-c408-51f9-8636-26359b1f60f0",
+        "label": "27",
+        "localizedSize": "27",
+        "nikeSize": "9",
+        "size": "9",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "f3a22661-386a-5679-89fc-681a787f6d2b",
+        "label": "28",
+        "localizedSize": "28",
+        "nikeSize": "10",
+        "size": "10",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "4cc94469-6a1f-5ee0-876a-c57f4c4c43b9",
+        "label": "29",
+        "localizedSize": "29",
+        "nikeSize": "11",
+        "size": "11",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      },
+      {
+        "id": "532973b2-d449-5400-9d98-d7954839dcc9",
+        "label": "30",
+        "localizedSize": "30",
+        "nikeSize": "12",
+        "size": "12",
+        "available": false,
+        "level": "OUT_OF_STOCK"
+      }
+    ],
+    "availableSizes": [],
+    "matchingSizes": [],
+    "inStock": false,
+    "statusLabel": "全サイズ在庫なし",
+    "source": "nike-next-data",
+    "ok": true,
+    "checkedAt": "2026-07-07T14:47:09.256Z",
+    "sourceUrl": "https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005",
+    "errors": []
+  },
+  "lastError": null,
+  "events": [
+    {
+      "id": "actions-1783435629259",
+      "type": "check",
+      "message": "GitHub Actions確認: 全サイズ在庫なし",
+      "at": "2026-07-07T14:47:09.256Z",
+      "result": {
+        "ok": true,
+        "source": "nike-next-data",
+        "statusLabel": "全サイズ在庫なし",
+        "inStock": false,
+        "matchingSizes": [],
+        "checkedAt": "2026-07-07T14:47:09.256Z"
+      }
+    }
+  ]
+}

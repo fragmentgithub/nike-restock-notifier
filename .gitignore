@@ -1,0 +1,6 @@
+data/*.json
+!data/.gitkeep
+.monitor-state/
+node_modules/
+.DS_Store
+Thumbs.db
