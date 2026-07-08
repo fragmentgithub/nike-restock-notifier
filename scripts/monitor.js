@@ -168,6 +168,8 @@ async function readJson(filePath, fallback) {
 }
 
 function clampNumber(value, fallback, min, max) {
+  // 未設定のリポジトリ変数は空文字列で渡ってくる(Number('') === 0 になるので明示的に弾く)
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
