@@ -17,7 +17,7 @@ GitHubのリポジトリ設定で以下を追加します。
 - Secret: `DISCORD_WEBHOOK` Discord webhookのURL
 - Variable: `SIZE_FILTERS` 例: `26,27`(空なら全サイズ対象)
 - Variable: `PRODUCT_URL` 変更したい商品URLがある場合だけ
-- Variable: `INTERVAL_SECONDS` チェック間隔の秒数(デフォルト120、最小60)
+- Variable: `INTERVAL_SECONDS` チェック間隔の秒数(デフォルト120、最小30)
 - Variable: `LOOP_MINUTES` 1回の実行がチェックし続ける分数(デフォルト25)
 
 Secret設定後のテストは、GitHub Actionsの `Discord Test` workflowを手動実行します。

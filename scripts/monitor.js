@@ -13,7 +13,7 @@ const MAX_EVENTS = 40;
 const config = {
   productUrl: process.env.PRODUCT_URL || DEFAULT_PRODUCT_URL,
   sizeFilters: process.env.SIZE_FILTERS || '',
-  intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 60, 1800),
+  intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 30, 1800),
   loopMinutes: clampNumber(process.env.LOOP_MINUTES, 25, 0, 340),
   discordWebhook: process.env.DISCORD_WEBHOOK || '',
 };
