@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { checkNikeStock } from '../src/nike.js';
 
 const DEFAULT_PRODUCT_URL =
@@ -7,76 +8,156 @@ const DEFAULT_PRODUCT_URL =
 const STATE_DIR = '.monitor-state';
 const STATE_PATH = `${STATE_DIR}/state.json`;
 const STATUS_PATH = 'public/status.json';
+const MAX_EVENTS = 40;
 
 const config = {
   productUrl: process.env.PRODUCT_URL || DEFAULT_PRODUCT_URL,
   sizeFilters: process.env.SIZE_FILTERS || '',
-  intervalSeconds: Math.max(300, Number(process.env.INTERVAL_SECONDS || 300)),
+  intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 60, 1800),
+  loopMinutes: clampNumber(process.env.LOOP_MINUTES, 25, 0, 340),
   discordWebhook: process.env.DISCORD_WEBHOOK || '',
 };
 
 await mkdir(STATE_DIR, { recursive: true });
 
-const previousState = await readJson(STATE_PATH, {});
-const result = await checkNikeStock(config.productUrl, {
-  sizeFilters: config.sizeFilters,
-  timeoutMs: 20000,
-});
+const state = await readJson(STATE_PATH, {});
+const events = Array.isArray(state.events) ? state.events.slice(0, MAX_EVENTS) : [];
+const deadline = Date.now() + config.loopMinutes * 60 * 1000;
+let checks = 0;
+let notifications = 0;
+let lastResult = null;
 
-const nextStockKey = stockKey(result.matchingSizes) || (result.inStock ? '__product__' : '');
-const shouldNotify = result.inStock && nextStockKey && nextStockKey !== previousState.lastStockKey;
-const checkedAt = result.checkedAt || new Date().toISOString();
-const message = `GitHub Actions確認: ${result.statusLabel}`;
-const event = {
-  id: `actions-${Date.now()}`,
-  type: result.ok ? 'check' : 'error',
-  message,
-  at: checkedAt,
-  result: {
-    ok: result.ok,
-    source: result.source,
-    statusLabel: result.statusLabel,
-    inStock: result.inStock,
-    matchingSizes: result.matchingSizes,
-    checkedAt,
-  },
-};
+for (;;) {
+  checks += 1;
+  try {
+    const notified = await runCheck();
+    if (notified) notifications += 1;
+  } catch (error) {
+    pushEvent({
+      id: `actions-error-${Date.now()}`,
+      type: 'error',
+      message: `監視処理でエラー: ${error.message}`,
+      at: new Date().toISOString(),
+      result: null,
+    });
+    await persist(new Date().toISOString(), '監視処理でエラーが発生しました。');
+  }
 
-if (shouldNotify && config.discordWebhook) {
-  await sendDiscordNotification({
-    webhook: config.discordWebhook,
-    title: `${result.product.title} が在庫あり`,
-    message: result.matchingSizes.length
-      ? `対象サイズ: ${result.matchingSizes.map((size) => size.label).join(', ')}`
-      : '対象商品が購入できる可能性があります。',
-    url: result.product.url,
-    sizes: result.matchingSizes,
-    imageUrl: result.product.imageUrl,
-  });
+  if (Date.now() + config.intervalSeconds * 1000 > deadline) break;
+  await sleep(config.intervalSeconds * 1000);
 }
 
-const nextState = {
-  lastStockKey: result.inStock ? nextStockKey : '',
-  lastCheckedAt: checkedAt,
-};
+console.log(
+  JSON.stringify(
+    {
+      checks,
+      notifications,
+      intervalSeconds: config.intervalSeconds,
+      loopMinutes: config.loopMinutes,
+      lastStockKey: state.lastStockKey || '',
+    },
+    null,
+    2,
+  ),
+);
 
-const publicStatus = {
-  updatedAt: checkedAt,
-  config: {
-    productUrl: config.productUrl,
+async function runCheck() {
+  const result = await checkNikeStock(config.productUrl, {
     sizeFilters: config.sizeFilters,
-    intervalSeconds: config.intervalSeconds,
-    discordWebhookSet: Boolean(config.discordWebhook),
-  },
-  lastResult: result,
-  lastError: result.ok ? null : 'Nikeの商品ページを確認できませんでした。',
-  events: [event],
-};
+    timeoutMs: 20000,
+  });
 
-await writeFile(STATE_PATH, JSON.stringify(nextState, null, 2), 'utf8');
-await writeFile(STATUS_PATH, JSON.stringify(publicStatus, null, 2), 'utf8');
+  const checkedAt = result.checkedAt || new Date().toISOString();
+  const nextStockKey = stockKey(result.matchingSizes) || (result.inStock ? '__product__' : '');
+  const shouldNotify = result.inStock && nextStockKey && nextStockKey !== state.lastStockKey;
 
-console.log(JSON.stringify({ statusLabel: result.statusLabel, inStock: result.inStock, notified: shouldNotify }, null, 2));
+  pushEvent({
+    id: `actions-${Date.now()}`,
+    type: result.ok ? 'check' : 'error',
+    message: `GitHub Actions確認: ${result.statusLabel}`,
+    at: checkedAt,
+    result: {
+      ok: result.ok,
+      source: result.source,
+      statusLabel: result.statusLabel,
+      inStock: result.inStock,
+      matchingSizes: result.matchingSizes,
+      checkedAt,
+    },
+  });
+
+  let notified = false;
+  if (shouldNotify && config.discordWebhook) {
+    try {
+      await sendDiscordNotification({
+        webhook: config.discordWebhook,
+        title: `${result.product.title} が在庫あり`,
+        message: result.matchingSizes.length
+          ? `対象サイズ: ${result.matchingSizes.map((size) => size.label).join(', ')}`
+          : '対象商品が購入できる可能性があります。',
+        url: result.product.url,
+        sizes: result.matchingSizes,
+        imageUrl: result.product.imageUrl,
+      });
+      notified = true;
+      pushEvent({
+        id: `notify-${Date.now()}`,
+        type: 'notify',
+        message: `Discord通知を送信しました: ${result.statusLabel}`,
+        at: new Date().toISOString(),
+        result: null,
+      });
+    } catch (error) {
+      pushEvent({
+        id: `notify-error-${Date.now()}`,
+        type: 'error',
+        message: `Discord通知に失敗しました: ${error.message}`,
+        at: new Date().toISOString(),
+        result: null,
+      });
+    }
+  }
+
+  if (result.inStock) {
+    // 通知に失敗した場合はキーを更新せず、次のチェックで再通知を試みる
+    if (!shouldNotify || notified || !config.discordWebhook) {
+      state.lastStockKey = nextStockKey;
+    }
+  } else {
+    state.lastStockKey = '';
+  }
+  state.lastCheckedAt = checkedAt;
+
+  lastResult = result;
+  await persist(checkedAt, result.ok ? null : 'Nikeの商品ページを確認できませんでした。');
+  return notified;
+}
+
+async function persist(updatedAt, lastError) {
+  state.events = events;
+
+  const publicStatus = {
+    updatedAt,
+    config: {
+      productUrl: config.productUrl,
+      sizeFilters: config.sizeFilters,
+      intervalSeconds: config.intervalSeconds,
+      loopMinutes: config.loopMinutes,
+      discordWebhookSet: Boolean(config.discordWebhook),
+    },
+    lastResult,
+    lastError,
+    events,
+  };
+
+  await writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
+  await writeFile(STATUS_PATH, JSON.stringify(publicStatus, null, 2), 'utf8');
+}
+
+function pushEvent(event) {
+  events.unshift(event);
+  events.splice(MAX_EVENTS);
+}
 
 async function readJson(filePath, fallback) {
   try {
@@ -84,6 +165,12 @@ async function readJson(filePath, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function clampNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
 }
 
 function stockKey(sizes = []) {

@@ -21,6 +21,7 @@ concurrency:
 jobs:
   monitor-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -47,6 +48,7 @@ jobs:
           PRODUCT_URL: ${{ vars.PRODUCT_URL }}
           SIZE_FILTERS: ${{ vars.SIZE_FILTERS }}
           INTERVAL_SECONDS: ${{ vars.INTERVAL_SECONDS }}
+          LOOP_MINUTES: ${{ vars.LOOP_MINUTES }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/monitor.js
 

@@ -146,6 +146,7 @@ async function loadStaticState() {
         productUrl: payload.config?.productUrl || DEFAULT_PRODUCT_URL,
         sizeFilters: payload.config?.sizeFilters || '',
         intervalSeconds: payload.config?.intervalSeconds || 300,
+        loopMinutes: Number(payload.config?.loopMinutes) || 0,
         discordWebhook: '',
         discordWebhookSet: Boolean(payload.config?.discordWebhookSet),
         running: false,
@@ -329,6 +330,11 @@ function nextCheckText(currentState, config) {
   if (!staticMode) return '-';
 
   const intervalSeconds = Number(config.intervalSeconds || 300);
+  const loopMinutes = Number(config.loopMinutes || 0);
+  if (loopMinutes) {
+    return `約${Math.max(1, Math.round(intervalSeconds / 60))}分ごと(ページ更新は約${loopMinutes}分ごと)`;
+  }
+
   const lastCheckedAt = currentState.lastResult?.checkedAt || currentState.pagesUpdatedAt;
   if (lastCheckedAt) {
     const next = new Date(new Date(lastCheckedAt).getTime() + intervalSeconds * 1000);
@@ -345,7 +351,10 @@ function isStaticStatusStale(currentState, config) {
   if (!lastCheckedAt) return false;
 
   const intervalSeconds = Number(config.intervalSeconds || 300);
-  return Date.now() - new Date(lastCheckedAt).getTime() > intervalSeconds * 3 * 1000;
+  const loopMinutes = Number(config.loopMinutes || 0);
+  // ループ運用ではページ更新はActions実行(=ループ)単位なので、その2周分までは正常とみなす
+  const staleAfterSeconds = Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
+  return Date.now() - new Date(lastCheckedAt).getTime() > staleAfterSeconds * 1000;
 }
 
 function showToast(message) {
