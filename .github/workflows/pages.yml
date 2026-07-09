@@ -72,3 +72,11 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+      # cronの発火遅延(実測1時間超もある)に依存せず監視を連続させるための自己連鎖。
+      # 実行が異常終了して連鎖が切れた場合はcronがバックアップとして再開する。
+      - name: Queue next monitor run
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main --repo ${{ github.repository }}
