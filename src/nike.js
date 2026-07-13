@@ -1,3 +1,5 @@
+import { extractNikeMind001Products } from './discovery.js';
+
 const NIKE_CHANNEL_ID = 'd9a5bc42-4b9c-4976-858a-f159cf99c647';
 
 const MARKETPLACE_BY_PATH = new Map([
@@ -105,6 +107,7 @@ export async function checkNikeStock(productUrl, options = {}) {
 
     const html = await response.text();
     const parsed = parseProductPage(html, productRef, sizeFilters);
+    const relatedProducts = extractNikeMind001Products(html, productRef.url);
 
     return {
       ...parsed,
@@ -112,6 +115,7 @@ export async function checkNikeStock(productUrl, options = {}) {
       checkedAt: new Date().toISOString(),
       source: parsed.source || 'nike-product-page',
       sourceUrl: productRef.url,
+      relatedProducts,
       errors,
     };
   } catch (error) {
@@ -168,6 +172,7 @@ export async function checkNikeStock(productUrl, options = {}) {
     matchingSizes: [],
     inStock: false,
     statusLabel: '確認できません',
+    relatedProducts: [],
     errors,
   };
 }

@@ -1,5 +1,5 @@
 const DEFAULT_PRODUCT_URL =
-  'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005';
+  'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-c9CoQHlk/HQ4307-005';
 
 const form = document.querySelector('#settingsForm');
 const saveButton = form.querySelector('button[type="submit"]');
@@ -8,6 +8,7 @@ const sizeFiltersInput = document.querySelector('#sizeFilters');
 const intervalInput = document.querySelector('#intervalSeconds');
 const discordWebhookInput = document.querySelector('#discordWebhook');
 const webhookHint = document.querySelector('#webhookHint');
+const discoveryHint = document.querySelector('#discoveryHint');
 const startButton = document.querySelector('#startButton');
 const stopButton = document.querySelector('#stopButton');
 const checkButton = document.querySelector('#checkButton');
@@ -15,14 +16,11 @@ const notifyButton = document.querySelector('#notifyButton');
 const testDiscordButton = document.querySelector('#testDiscordButton');
 const runStatus = document.querySelector('#runStatus');
 const checkStatus = document.querySelector('#checkStatus');
-const productImage = document.querySelector('#productImage');
-const productTitle = document.querySelector('#productTitle');
-const productSubtitle = document.querySelector('#productSubtitle');
-const productLink = document.querySelector('#productLink');
-const stockStatus = document.querySelector('#stockStatus');
+const productCount = document.querySelector('#productCount');
+const availableProductCount = document.querySelector('#availableProductCount');
 const lastChecked = document.querySelector('#lastChecked');
 const nextCheck = document.querySelector('#nextCheck');
-const sizeRows = document.querySelector('#sizeRows');
+const productGrid = document.querySelector('#productGrid');
 const eventLog = document.querySelector('#eventLog');
 const pagesLinks = document.querySelector('#pagesLinks');
 
@@ -36,11 +34,7 @@ refreshState().then(() => {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (staticMode) {
-    showToast('GitHub Pages版では画面から設定変更できません。');
-    return;
-  }
-
+  if (staticMode) return showToast('GitHub Pages版の設定はGitHub Actions Variablesで管理します。');
   await saveConfig();
 });
 
@@ -64,21 +58,13 @@ checkButton.addEventListener('click', async () => {
 });
 
 notifyButton.addEventListener('click', async () => {
-  if (!('Notification' in window)) {
-    showToast('このブラウザは通知に対応していません。');
-    return;
-  }
-
+  if (!('Notification' in window)) return showToast('このブラウザは通知に対応していません。');
   const permission = await Notification.requestPermission();
   showToast(permission === 'granted' ? 'ブラウザ通知を許可しました。' : 'ブラウザ通知は許可されていません。');
 });
 
 testDiscordButton.addEventListener('click', async () => {
-  if (staticMode) {
-    showToast('GitHub Pages版のDiscord通知はGitHub Actionsから送信されます。');
-    return;
-  }
-
+  if (staticMode) return showToast('Discord通知はGitHub Actionsから送信されます。');
   await saveConfig(false);
   await api('/api/test-discord', { method: 'POST' });
   showToast('Discordへテスト通知を送りました。');
@@ -106,22 +92,14 @@ async function saveConfig(showSaved = true) {
 
 function connectEvents() {
   if (!('EventSource' in window) || eventStream) return;
-
   eventStream = new EventSource('/api/events');
-
-  eventStream.addEventListener('state', (event) => {
-    render(JSON.parse(event.data));
-  });
-
+  eventStream.addEventListener('state', (event) => render(JSON.parse(event.data)));
   eventStream.addEventListener('restock', (event) => {
     const payload = JSON.parse(event.data);
     showToast(`${payload.title}\n${payload.message}`);
     sendBrowserNotification(payload);
   });
-
-  eventStream.addEventListener('event', () => {
-    refreshState();
-  });
+  eventStream.addEventListener('event', () => refreshState());
 }
 
 async function refreshState() {
@@ -140,17 +118,17 @@ async function loadStaticState() {
     const response = await fetch('status.json', { cache: 'no-store' });
     if (!response.ok) throw new Error('status.json not found');
     const payload = await response.json();
-
     return {
       config: {
+        ...(payload.config || {}),
         productUrl: payload.config?.productUrl || DEFAULT_PRODUCT_URL,
-        sizeFilters: payload.config?.sizeFilters || '',
-        intervalSeconds: payload.config?.intervalSeconds || 300,
-        loopMinutes: Number(payload.config?.loopMinutes) || 0,
+        intervalSeconds: payload.config?.intervalSeconds || 120,
         discordWebhook: '',
         discordWebhookSet: Boolean(payload.config?.discordWebhookSet),
         running: false,
       },
+      discovery: payload.discovery || null,
+      products: payload.products || [],
       lastResult: payload.lastResult || null,
       lastError: payload.lastError || null,
       checking: false,
@@ -160,40 +138,22 @@ async function loadStaticState() {
     };
   } catch {
     return {
-      config: {
-        productUrl: DEFAULT_PRODUCT_URL,
-        sizeFilters: '',
-        intervalSeconds: 300,
-        discordWebhook: '',
-        discordWebhookSet: false,
-        running: false,
-      },
+      config: { productUrl: DEFAULT_PRODUCT_URL, sizeFilters: '', intervalSeconds: 120 },
+      products: [],
       lastResult: null,
       lastError: null,
       checking: false,
-      nextCheckAt: null,
-      events: [
-        {
-          id: 'static-initial',
-          type: 'settings',
-          message: 'GitHub Actionsが実行されると直近の確認結果が表示されます。',
-          at: new Date().toISOString(),
-          result: null,
-        },
-      ],
+      events: [],
     };
   }
 }
 
 async function api(path, options = {}) {
   const { suppressToast = false, ...fetchOptions } = options;
-
   setBusy(true);
   try {
     const response = await fetch(path, {
-      headers: {
-        'content-type': 'application/json',
-      },
+      headers: { 'content-type': 'application/json' },
       ...fetchOptions,
     });
     const text = await response.text();
@@ -211,69 +171,112 @@ async function api(path, options = {}) {
 function render(nextState) {
   state = nextState;
   const config = state.config || {};
-  const result = state.lastResult;
+  const products = normalizedProducts(state);
+  const results = products.map((item) => item.lastResult).filter(Boolean);
+  const latestCheckedAt = latestDate(results.map((result) => result.checkedAt));
+  const availableCount = results.filter((result) => result.inStock).length;
 
-  productUrlInput.value = config.productUrl || '';
+  productUrlInput.value = config.productUrl || DEFAULT_PRODUCT_URL;
   sizeFiltersInput.value = config.sizeFilters || '';
   intervalInput.value = config.intervalSeconds || 120;
   discordWebhookInput.value = '';
   webhookHint.textContent = staticMode
-    ? 'GitHub Pages版では設定はGitHub ActionsのVariablesとSecretsで管理します。'
+    ? 'Discord webhookはGitHub Actions Secretsで管理されています。'
     : config.discordWebhookSet
       ? 'Discord webhookは設定済みです。変更する場合だけ入力してください。'
       : 'Discord webhookは未設定です。';
 
-  runStatus.textContent = staticMode ? 'Pages版' : config.running ? '監視中' : '停止中';
+  const discoveryAt = state.discovery?.lastCheckedAt;
+  discoveryHint.textContent = state.discovery?.lastError
+    ? `新カラー探索でエラー（既知の商品は監視継続）: ${state.discovery.lastError}`
+    : discoveryAt
+      ? `新カラー自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
+      : '新カラー自動追尾: 初回探索待ち';
+
+  runStatus.textContent = staticMode ? '自動監視中' : config.running ? '監視中' : '停止中';
   runStatus.className = `status-pill ${config.running || staticMode ? 'running' : ''}`;
 
   const stale = staticMode && isStaticStatusStale(state, config);
-  checkStatus.textContent = staticMode ? (stale ? '遅延' : '公開中') : state.checking ? '確認中' : state.lastError ? 'エラー' : '待機中';
-  checkStatus.className = `small-status ${state.lastError || stale ? 'error' : state.checking ? '' : 'ok'}`;
+  checkStatus.textContent = stale ? '更新遅延' : state.checking ? '確認中' : state.lastError ? '一部エラー' : '稼働中';
+  checkStatus.className = `small-status ${state.lastError || stale ? 'error' : 'ok'}`;
 
-  if (result?.product) {
-    productTitle.textContent = result.product.title || 'Nike product';
-    productSubtitle.textContent = [result.product.subtitle, result.product.styleColor, result.product.price]
-      .filter(Boolean)
-      .join(' / ');
-    productLink.href = result.product.url || config.productUrl;
-
-    if (result.product.imageUrl) {
-      productImage.style.backgroundImage = `url("${result.product.imageUrl}")`;
-    }
-  } else {
-    productTitle.textContent = '商品データ未取得';
-    productSubtitle.textContent = '';
-    productLink.href = config.productUrl || '#';
-    productImage.style.backgroundImage = '';
-  }
-
-  stockStatus.textContent = result?.statusLabel || '未確認';
-  lastChecked.textContent = result?.checkedAt ? formatDate(result.checkedAt) : state.pagesUpdatedAt ? formatDate(state.pagesUpdatedAt) : '-';
+  productCount.textContent = String(products.length);
+  availableProductCount.textContent = String(availableCount);
+  lastChecked.textContent = latestCheckedAt
+    ? formatDate(latestCheckedAt)
+    : state.pagesUpdatedAt
+      ? formatDate(state.pagesUpdatedAt)
+      : '-';
   nextCheck.textContent = nextCheckText(state, config);
-  renderSizes(result?.sizes || []);
+  renderProducts(products);
   renderEvents(state.events || []);
   setStaticControls();
 }
 
-function renderSizes(sizes) {
-  if (!sizes.length) {
-    sizeRows.innerHTML = '<tr><td colspan="3">サイズ情報はまだありません。</td></tr>';
+function normalizedProducts(currentState) {
+  if (Array.isArray(currentState.products) && currentState.products.length) {
+    return currentState.products.map((item) => ({
+      styleColor: item.styleColor || item.lastResult?.product?.styleColor || '',
+      url: item.url || item.lastResult?.product?.url || '#',
+      discoveredAt: item.discoveredAt || null,
+      lastResult: item.lastResult || null,
+    }));
+  }
+
+  if (currentState.lastResult) {
+    return [{
+      styleColor: currentState.lastResult.product?.styleColor || '',
+      url: currentState.lastResult.product?.url || currentState.config?.productUrl || '#',
+      discoveredAt: null,
+      lastResult: currentState.lastResult,
+    }];
+  }
+  return [];
+}
+
+function renderProducts(products) {
+  if (!products.length) {
+    productGrid.innerHTML = '<p class="empty-state">商品データはまだありません。</p>';
     return;
   }
 
-  sizeRows.innerHTML = sizes
-    .map(
-      (size) => `
-        <tr>
-          <td>${escapeHtml(size.label || '-')}</td>
-          <td><span class="stock-badge ${size.available ? 'available' : ''}">${
-            size.available ? '在庫あり' : '在庫なし'
-          }</span></td>
-          <td>${escapeHtml(size.level || '-')}</td>
-        </tr>
-      `,
-    )
-    .join('');
+  productGrid.innerHTML = products.map((item) => {
+    const result = item.lastResult;
+    const product = result?.product || {};
+    const sizes = result?.sizes || [];
+    const availableSizes = sizes.filter((size) => size.available);
+    const title = product.title || `Nike Mind 001 ${item.styleColor}`;
+    const subtitle = [product.subtitle, item.styleColor, product.price].filter(Boolean).join(' / ');
+    const status = result?.statusLabel || '初回確認待ち';
+    const statusClass = result?.inStock ? 'available' : result?.ok === false ? 'error' : '';
+    const sizeText = availableSizes.length
+      ? availableSizes.map((size) => size.label).join(', ')
+      : sizes.length
+        ? '在庫ありサイズなし'
+        : 'サイズ情報待ち';
+
+    return `
+      <article class="product-card">
+        <a class="product-card-image" href="${escapeHtml(product.url || item.url)}" target="_blank" rel="noreferrer">
+          ${product.imageUrl ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(title)}" loading="lazy" />` : '<span>NO IMAGE</span>'}
+        </a>
+        <div class="product-card-body">
+          <div class="product-card-heading">
+            <div>
+              <p class="style-code">${escapeHtml(item.styleColor || product.styleColor || '-')}</p>
+              <h3>${escapeHtml(title)}</h3>
+            </div>
+            <span class="stock-badge ${statusClass}">${escapeHtml(status)}</span>
+          </div>
+          <p class="product-subtitle">${escapeHtml(subtitle)}</p>
+          <p class="size-summary"><strong>在庫サイズ</strong> ${escapeHtml(sizeText)}</p>
+          <div class="product-card-footer">
+            <span>${result?.checkedAt ? `確認 ${formatDate(result.checkedAt)}` : '未確認'}</span>
+            <a href="${escapeHtml(product.url || item.url)}" target="_blank" rel="noreferrer">商品ページ</a>
+          </div>
+        </div>
+      </article>`;
+  }).join('');
 }
 
 function renderEvents(events) {
@@ -282,26 +285,19 @@ function renderEvents(events) {
     return;
   }
 
-  eventLog.innerHTML = events
-    .slice(0, 40)
-    .map(
-      (event) => `
-        <li>
-          <span>${formatDate(event.at)}</span>
-          <strong>${escapeHtml(event.message)}</strong>
-        </li>
-      `,
-    )
-    .join('');
+  eventLog.innerHTML = events.slice(0, 40).map((event) => `
+    <li>
+      <span>${formatDate(event.at)}</span>
+      <strong>${escapeHtml(event.message)}</strong>
+    </li>`).join('');
 }
 
 function sendBrowserNotification(payload) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-
   new Notification(payload.title, {
     body: payload.message,
     icon: payload.product?.imageUrl || undefined,
-    tag: 'nike-restock',
+    tag: `nike-restock-${payload.product?.styleColor || 'product'}`,
   });
 }
 
@@ -312,14 +308,10 @@ function setBusy(isBusy) {
 }
 
 function setStaticControls() {
-  if (pagesLinks) {
-    pagesLinks.hidden = !staticMode;
-  }
-
+  if (pagesLinks) pagesLinks.hidden = !staticMode;
   for (const input of [productUrlInput, sizeFiltersInput, intervalInput, discordWebhookInput]) {
     input.disabled = staticMode;
   }
-
   for (const button of [saveButton, startButton, stopButton, checkButton, testDiscordButton]) {
     button.disabled = staticMode;
   }
@@ -328,33 +320,27 @@ function setStaticControls() {
 function nextCheckText(currentState, config) {
   if (currentState.nextCheckAt) return formatDate(currentState.nextCheckAt);
   if (!staticMode) return '-';
-
-  const intervalSeconds = Number(config.intervalSeconds || 300);
+  const intervalSeconds = Number(config.intervalSeconds || 120);
   const loopMinutes = Number(config.loopMinutes || 0);
-  if (loopMinutes) {
-    return `約${Math.max(1, Math.round(intervalSeconds / 60))}分ごと(ページ更新は約${loopMinutes}分ごと)`;
-  }
-
-  const lastCheckedAt = currentState.lastResult?.checkedAt || currentState.pagesUpdatedAt;
-  if (lastCheckedAt) {
-    const next = new Date(new Date(lastCheckedAt).getTime() + intervalSeconds * 1000);
-    if (next.getTime() > Date.now()) {
-      return `約${formatDate(next.toISOString())}`;
-    }
-  }
-
-  return `${Math.max(1, Math.round(intervalSeconds / 60))}分ごと`;
+  return loopMinutes
+    ? `各商品 約${Math.max(1, Math.round(intervalSeconds / 60))}分ごと`
+    : `${Math.max(1, Math.round(intervalSeconds / 60))}分ごと`;
 }
 
 function isStaticStatusStale(currentState, config) {
-  const lastCheckedAt = currentState.lastResult?.checkedAt || currentState.pagesUpdatedAt;
+  const products = normalizedProducts(currentState);
+  const lastCheckedAt = latestDate(products.map((item) => item.lastResult?.checkedAt)) || currentState.pagesUpdatedAt;
   if (!lastCheckedAt) return false;
-
-  const intervalSeconds = Number(config.intervalSeconds || 300);
+  const intervalSeconds = Number(config.intervalSeconds || 120);
   const loopMinutes = Number(config.loopMinutes || 0);
-  // ループ運用ではページ更新はActions実行(=ループ)単位なので、その2周分までは正常とみなす
   const staleAfterSeconds = Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
   return Date.now() - new Date(lastCheckedAt).getTime() > staleAfterSeconds * 1000;
+}
+
+function latestDate(values) {
+  return values
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
 }
 
 function showToast(message) {
@@ -364,7 +350,6 @@ function showToast(message) {
     toast.className = 'toast';
     document.body.appendChild(toast);
   }
-
   toast.textContent = message;
   toast.classList.add('visible');
   clearTimeout(showToast.timer);
@@ -382,7 +367,7 @@ function formatDate(value) {
 }
 
 function escapeHtml(value) {
-  return String(value)
+  return String(value || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

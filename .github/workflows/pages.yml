@@ -46,9 +46,13 @@ jobs:
       - name: Check Nike stock
         env:
           PRODUCT_URL: ${{ vars.PRODUCT_URL }}
+          PRODUCT_URLS: ${{ vars.PRODUCT_URLS }}
           SIZE_FILTERS: ${{ vars.SIZE_FILTERS }}
           INTERVAL_SECONDS: ${{ vars.INTERVAL_SECONDS }}
           LOOP_MINUTES: ${{ vars.LOOP_MINUTES }}
+          DISCOVERY_URL: ${{ vars.DISCOVERY_URL }}
+          DISCOVERY_INTERVAL_HOURS: ${{ vars.DISCOVERY_INTERVAL_HOURS }}
+          PRODUCT_CHECK_DELAY_MS: ${{ vars.PRODUCT_CHECK_DELAY_MS }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/monitor.js
 

@@ -26,7 +26,7 @@
           </div>
 
           <label>
-            <span>Nike商品URL</span>
+            <span>追加シード商品URL</span>
             <input id="productUrl" name="productUrl" type="url" required />
           </label>
 
@@ -62,6 +62,7 @@
           </div>
 
           <p class="hint" id="webhookHint">Discord webhookは未設定です。</p>
+          <p class="hint" id="discoveryHint">新カラー自動追尾: 初回探索待ち</p>
           <div class="pages-links" id="pagesLinks" hidden>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/pages.yml" target="_blank" rel="noreferrer">Monitor</a>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/discord-test.yml" target="_blank" rel="noreferrer">Discord Test</a>
@@ -76,19 +77,14 @@
             <div class="small-status" id="checkStatus">待機中</div>
           </div>
 
-          <div class="product-row">
-            <div class="product-image" id="productImage"></div>
-            <div class="product-meta">
-              <h3 id="productTitle">商品データ未取得</h3>
-              <p id="productSubtitle"></p>
-              <a id="productLink" href="#" target="_blank" rel="noreferrer">商品ページを開く</a>
-            </div>
-          </div>
-
-          <div class="metric-grid">
+          <div class="metric-grid metric-grid-four">
             <div>
-              <span>判定</span>
-              <strong id="stockStatus">未確認</strong>
+              <span>追跡商品</span>
+              <strong id="productCount">0</strong>
+            </div>
+            <div>
+              <span>在庫あり商品</span>
+              <strong id="availableProductCount">0</strong>
             </div>
             <div>
               <span>最終確認</span>
@@ -100,22 +96,7 @@
             </div>
           </div>
 
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>サイズ</th>
-                  <th>状態</th>
-                  <th>在庫レベル</th>
-                </tr>
-              </thead>
-              <tbody id="sizeRows">
-                <tr>
-                  <td colspan="3">まだ確認していません。</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <div class="product-grid" id="productGrid"></div>
         </section>
       </section>
 
