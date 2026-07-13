@@ -21,17 +21,42 @@ test('取得失敗時は通知済みキーを保持する', () => {
   assert.equal(decision.shouldNotify, false);
 });
 
-test('在庫なしを正常確認した場合だけ通知済みキーを消す', () => {
+test('在庫なしを連続確認したらキーを消す(単発フリッカでは消さない)', () => {
   const entry = { lastStockKey: '27' };
   const result = { ok: true, inStock: false, matchingSizes: [] };
-  const decision = notificationDecision(entry, result);
+  const apply = () => {
+    const decision = notificationDecision(entry, result);
+    applyCheckState(entry, result, { ...decision, notified: false, webhookConfigured: true });
+  };
 
-  applyCheckState(entry, result, {
-    ...decision,
-    notified: false,
-    webhookConfigured: true,
-  });
+  apply();
+  // 1回目の inStock:false(パーサ・フォールバックのフリッカ想定)ではキーを保持し、重複通知を防ぐ。
+  assert.equal(entry.lastStockKey, '27');
+  apply();
+  // 連続で在庫なしを確認したら確定クリアし、再入荷時に再通知できるようにする。
   assert.equal(entry.lastStockKey, '');
+});
+
+test('汎用在庫(__product__)から具体サイズが判明したら通知する', () => {
+  const entry = { lastStockKey: '__product__' };
+  const result = {
+    ok: true,
+    inStock: true,
+    matchingSizes: [{ label: '27', available: true }],
+  };
+
+  const decision = notificationDecision(entry, result);
+  assert.equal(decision.nextStockKey, '27');
+  assert.equal(decision.shouldNotify, true);
+});
+
+test('汎用在庫(__product__)が続く間は再通知しない', () => {
+  const entry = { lastStockKey: '__product__' };
+  const result = { ok: true, inStock: true, matchingSizes: [] };
+
+  const decision = notificationDecision(entry, result);
+  assert.equal(decision.nextStockKey, '__product__');
+  assert.equal(decision.shouldNotify, false);
 });
 
 test('在庫サイズが減っただけでは再通知しない', () => {

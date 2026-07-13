@@ -1,5 +1,8 @@
+import { fetchWithTimeout, firstPresent, parseNextData } from './util.js';
+
 const STYLE_COLOR_PATTERN = /^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/i;
-const MIND_001_PATTERN = /nike\s*mind[\s\u00a0]*001/i;
+// \u30cf\u30a4\u30d5\u30f3\u3082\u8a31\u5bb9\u3059\u308b\uff08URL/slug \u306e "nike-mind-001" \u8868\u8a18\u3092\u53d6\u308a\u3053\u307c\u3055\u306a\u3044\u305f\u3081\uff09\u3002
+const MIND_001_PATTERN = /nike[\s\-\u00a0]*mind[\s\-\u00a0]*001/i;
 
 const DISCOVERY_HEADERS = {
   accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -27,9 +30,10 @@ export async function discoverNikeMind001Products(options = {}) {
   const fetchImpl = options.fetchImpl || fetch;
 
   try {
-    const response = await fetchWithTimeout(fetchImpl, catalogUrl, {
+    const response = await fetchWithTimeout(catalogUrl, {
       headers: DISCOVERY_HEADERS,
       timeoutMs,
+      fetchImpl,
     });
 
     if (!response.ok) {
@@ -155,36 +159,3 @@ function normalizeEscapedHtml(value) {
     .replace(/&#39;/g, "'");
 }
 
-function parseNextData(html) {
-  const idIndex = html.indexOf('__NEXT_DATA__');
-  if (idIndex === -1) return null;
-
-  const scriptStart = html.lastIndexOf('<script', idIndex);
-  const jsonStart = html.indexOf('>', scriptStart) + 1;
-  const jsonEnd = html.indexOf('</script>', jsonStart);
-  if (scriptStart === -1 || jsonStart === 0 || jsonEnd === -1) return null;
-
-  try {
-    return JSON.parse(html.slice(jsonStart, jsonEnd));
-  } catch {
-    return null;
-  }
-}
-
-async function fetchWithTimeout(fetchImpl, url, options) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
-
-  try {
-    return await fetchImpl(url, {
-      headers: options.headers,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function firstPresent(values) {
-  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || '';
-}

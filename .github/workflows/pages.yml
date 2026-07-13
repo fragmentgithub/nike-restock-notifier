@@ -35,8 +35,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Run tests
-        run: npm test
+      # テストは別ワークフロー(test.yml)で実行する。テスト失敗が在庫監視・通知・Pages更新を
+      # 止めないよう、監視ジョブからは意図的に切り離している。
 
       - name: Restore monitor state
         uses: actions/cache/restore@v6

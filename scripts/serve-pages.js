@@ -10,7 +10,14 @@ const port = Number(process.env.PORT || 4173);
 
 createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  const relativePath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+  let relativePath;
+  try {
+    relativePath = decodeURIComponent(url.pathname === '/' ? '/index.html' : url.pathname);
+  } catch {
+    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+    response.end('Bad request');
+    return;
+  }
   const filePath = path.resolve(publicDir, `.${relativePath}`);
 
   if (filePath !== publicDir && !filePath.startsWith(`${publicDir}${path.sep}`)) {

@@ -7,9 +7,9 @@
     "discord:test": "node scripts/test-discord.js",
     "monitor": "node scripts/monitor.js",
     "start": "node scripts/serve-pages.js",
-    "test": "node --test test/discovery.test.js test/nike.test.js test/monitor-state.test.js"
+    "test": "node --test \"test/**/*.test.js\""
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   }
 }

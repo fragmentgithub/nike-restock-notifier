@@ -1,4 +1,5 @@
 import { extractNikeMind001Products } from './discovery.js';
+import { fetchWithTimeout, firstPresent, parseNextData } from './util.js';
 
 const NIKE_CHANNEL_ID = 'd9a5bc42-4b9c-4976-858a-f159cf99c647';
 
@@ -102,6 +103,7 @@ export async function checkNikeStock(productUrl, options = {}) {
     });
 
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`${response.status} ${response.statusText}`);
     }
 
@@ -133,6 +135,7 @@ export async function checkNikeStock(productUrl, options = {}) {
       });
 
       if (!response.ok) {
+        await response.body?.cancel();
         errors.push(`${response.status} ${response.statusText}: ${endpoint}`);
         continue;
       }
@@ -193,20 +196,6 @@ function buildProductFeedUrls(productRef) {
   ];
 }
 
-async function fetchWithTimeout(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
-
-  try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 function parseProductFeed(payload, productRef, sizeFilters) {
   const containers = [
     ...asArray(payload?.objects),
@@ -222,7 +211,7 @@ function parseProductFeed(payload, productRef, sizeFilters) {
     }) || null;
 
   if (!matchingInfo) {
-    return emptyParsedProduct(productRef, sizeFilters);
+    return emptyParsedProduct();
   }
 
   const product = buildProductFromFeed(matchingInfo, productRef);
@@ -351,22 +340,6 @@ function parseProductPage(html, productRef, sizeFilters) {
           ? '販売中の可能性あり'
           : '在庫なし、またはページから判定不可',
   };
-}
-
-function parseNextData(html) {
-  const idIndex = html.indexOf('__NEXT_DATA__');
-  if (idIndex === -1) return null;
-
-  const scriptStart = html.lastIndexOf('<script', idIndex);
-  const jsonStart = html.indexOf('>', scriptStart) + 1;
-  const jsonEnd = html.indexOf('</script>', jsonStart);
-  if (scriptStart === -1 || jsonStart === 0 || jsonEnd === -1) return null;
-
-  try {
-    return JSON.parse(html.slice(jsonStart, jsonEnd));
-  } catch {
-    return null;
-  }
 }
 
 function parseNextProductData(nextData, productRef, sizeFilters) {
@@ -568,7 +541,7 @@ function nearSoldOutText(text, index) {
   );
 }
 
-function emptyParsedProduct(productRef) {
+function emptyParsedProduct() {
   return {
     product: null,
     sizes: [],
@@ -607,10 +580,6 @@ function formatPrice(price) {
   return `${currency} ${currentPrice}`.trim();
 }
 
-function firstPresent(values) {
-  return values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || '';
-}
-
 function attrValue(attrs, name) {
   const pattern = new RegExp(`${name}=["']([^"']+)["']`, 'i');
   return decodeHtml(attrs.match(pattern)?.[1] || '');
@@ -632,17 +601,27 @@ function firstImageByTestId(html, testId) {
   const index = html.search(marker);
   if (index === -1) return '';
   const section = html.slice(index, index + 10000);
-  const attrs = section.match(/<img\\b([^>]*)>/i)?.[1] || '';
+  const attrs = section.match(/<img\b([^>]*)>/i)?.[1] || '';
   return attrValue(attrs, 'src');
 }
 
 function isParsedPageUsable(parsed, html, productRef) {
   if (parsed?.source === 'nike-next-data') return true;
+
+  // \u5546\u54c1\u30bf\u30a4\u30c8\u30eb\u304c\u8aad\u3081\u3066\u3044\u308c\u3070\u6b63\u898f\u306e\u5546\u54c1\u30da\u30fc\u30b8\u3068\u307f\u306a\u3059\u3002
   const title = String(parsed?.product?.title || '');
-  return (
-    html.toUpperCase().includes(productRef.styleColor) ||
-    /nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title)
-  );
+  if (/nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title)) return true;
+
+  // \u30b9\u30bf\u30a4\u30eb\u30ab\u30e9\u30fc\u306e\u6587\u5b57\u5217\u4e00\u81f4\u3060\u3051\u3092\u4fe1\u983c\u3059\u308b\u3068\u3001\u8981\u6c42URL\u3092\u672c\u6587\u3078\u53cd\u5c04\u3059\u308b
+  // \u30d6\u30ed\u30c3\u30af/\u30a8\u30e9\u30fc\u30da\u30fc\u30b8\u3092\u300c\u4f7f\u7528\u53ef\u300d\u3068\u8aa4\u5224\u5b9a\u3057\u3001product_feed API\u3078\u306e\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\u3092
+  // \u6291\u6b62\u3057\u3066\u3057\u307e\u3046\u3002\u5b9f\u969b\u306e\u5546\u54c1\u69cb\u9020\u30de\u30fc\u30ab\u30fc\u306e\u4f75\u5b58\u3082\u8981\u6c42\u3059\u308b\u3002
+  const hasStyleColor = html.toUpperCase().includes(productRef.styleColor);
+  const hasProductMarkers =
+    parsed?.sizes?.length > 0 ||
+    /id=["']size-selector["']|data-testid=["'](?:currentPrice-container|product_title)["']/i.test(
+      html,
+    );
+  return hasStyleColor && hasProductMarkers;
 }
 
 function escapeRegExp(value) {

@@ -1,10 +1,14 @@
-name: Discord Test
+name: Tests
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
 
 jobs:
-  discord-test:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -16,7 +20,5 @@ jobs:
         with:
           node-version: 24
 
-      - name: Send Discord test notification
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-        run: node scripts/test-discord.js
+      - name: Run tests
+        run: npm test

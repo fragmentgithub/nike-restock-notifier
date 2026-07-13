@@ -73,7 +73,12 @@ function renderUnavailable(message) {
   runStatus.className = 'status-pill error';
   checkStatus.textContent = 'エラー';
   checkStatus.className = 'small-status error';
+  productCount.textContent = '-';
+  availableProductCount.textContent = '-';
+  lastChecked.textContent = '-';
+  nextCheck.textContent = '-';
   productGrid.innerHTML = `<p class="empty-state">ステータスを取得できません: ${escapeHtml(message)}</p>`;
+  eventLog.innerHTML = '<li><span>-</span><strong>履歴を取得できません。</strong></li>';
 }
 
 function normalizedProducts(state) {
@@ -119,7 +124,7 @@ function renderProducts(products) {
       : sizes.length
         ? '在庫ありサイズなし'
         : 'サイズ情報待ち';
-    const url = product.url || item.url;
+    const url = safeUrl(product.url || item.url);
 
     return `
       <article class="product-card">
@@ -174,13 +179,27 @@ function latestDate(values) {
 }
 
 function formatDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
   return new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
-  }).format(new Date(value));
+    timeZoneName: 'short',
+  }).format(date);
+}
+
+function safeUrl(value) {
+  try {
+    const url = new URL(value, 'https://www.nike.com');
+    if (url.protocol === 'http:' || url.protocol === 'https:') return url.toString();
+  } catch {
+    // 不正なURLは下でフォールバックする。
+  }
+  return '#';
 }
 
 function escapeHtml(value) {

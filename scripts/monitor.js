@@ -34,7 +34,7 @@ const config = {
   intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 30, 1800),
   loopMinutes: clampNumber(process.env.LOOP_MINUTES, 25, 0, 340),
   productCheckDelayMs: clampNumber(process.env.PRODUCT_CHECK_DELAY_MS, 1500, 0, 30000),
-  discordWebhook: process.env.DISCORD_WEBHOOK || '',
+  discordWebhook: validateWebhook(process.env.DISCORD_WEBHOOK || ''),
 };
 
 await mkdir(STATE_DIR, { recursive: true });
@@ -87,14 +87,20 @@ for (;;) {
       await persist(checkedAt);
     }
 
+    // スイープ途中でも deadline を超えたら打ち切る。商品数が増えても最終スイープが
+    // timeout-minutes を突き抜けてジョブが timeout/cancel されるのを防ぐ。
+    if (Date.now() >= deadline) break;
+
     if (index < products.length - 1 && config.productCheckDelayMs > 0) {
       await sleep(config.productCheckDelayMs);
     }
   }
 
-  state.consecutiveFailedCycles = cycleFailures
-    ? state.consecutiveFailedCycles + 1
-    : 0;
+  // バックオフは「全商品が失敗したサイクル」(＝ネットワーク障害/Nike側ブロック等)に限定する。
+  // 1商品だけの恒久失敗(例: discovery が拾った色の delist=404)でフリート全体の巡回間隔が
+  // 延び続けないようにする。
+  const allProductsFailed = products.length > 0 && cycleFailures === products.length;
+  state.consecutiveFailedCycles = allProductsFailed ? state.consecutiveFailedCycles + 1 : 0;
   const waitMs = nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles);
   await persist(new Date().toISOString());
   if (Date.now() + waitMs > deadline) break;
@@ -228,7 +234,7 @@ async function runCheck(entry) {
       pushEvent({
         id: `notify-error-${Date.now()}-${styleColor}`,
         type: 'error',
-        message: `Discord通知に失敗しました (${styleColor}): ${error.message}`,
+        message: `Discord通知に失敗しました (${styleColor}): ${scrubWebhook(error.message)}`,
         at: new Date().toISOString(),
         result: null,
       });
@@ -300,6 +306,7 @@ function normalizeKnownProducts(value) {
         discoveredAt: product.discoveredAt || new Date().toISOString(),
         lastSeenAt: product.lastSeenAt || null,
         lastStockKey: product.lastStockKey || '',
+        oosStreak: Number(product.oosStreak) || 0,
         lastResult: product.lastResult || null,
         lastRuntimeError: product.lastRuntimeError || null,
       };
@@ -377,6 +384,28 @@ async function readJson(filePath, fallback) {
   } catch {
     return fallback;
   }
+}
+
+function validateWebhook(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol === 'http:' || url.protocol === 'https:') return raw;
+  } catch {
+    // 下でまとめて無効化する。
+  }
+  // 不正な値は通知を無効化する。生の値はログにも出さない(トークン漏洩防止)。
+  console.warn('DISCORD_WEBHOOK is not a valid http(s) URL; Discord notifications are disabled.');
+  return '';
+}
+
+// webhook URL(トークン)が公開 events / status.json 経由で GitHub Pages に漏れないよう、
+// 通知失敗メッセージから webhook 文字列を伏せる。
+function scrubWebhook(text) {
+  let out = String(text || '');
+  if (config.discordWebhook) out = out.split(config.discordWebhook).join('[webhook]');
+  return out.replace(/https?:\/\/\S*discord(?:app)?\.com\/api\/webhooks\/\S+/gi, '[webhook]');
 }
 
 function clampNumber(value, fallback, min, max) {
