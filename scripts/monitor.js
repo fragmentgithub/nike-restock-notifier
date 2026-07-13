@@ -205,7 +205,9 @@ async function runCheck(entry) {
     }
   }
 
-  if (result.inStock) {
+  if (!result.ok) {
+    // 一時的な取得失敗では通知済み状態を変更しない。復旧時の重複通知を防ぐ。
+  } else if (result.inStock) {
     // 通知失敗時だけキーを更新せず、次のチェックで再送を試す。
     if (!shouldNotify || notified || !config.discordWebhook) entry.lastStockKey = nextStockKey;
   } else {

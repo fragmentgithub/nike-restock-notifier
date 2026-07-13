@@ -107,6 +107,9 @@ export async function checkNikeStock(productUrl, options = {}) {
 
     const html = await response.text();
     const parsed = parseProductPage(html, productRef, sizeFilters);
+    if (!isParsedPageUsable(parsed, html, productRef)) {
+      throw new Error('Nikeの商品データをページから読み取れませんでした');
+    }
     const relatedProducts = extractNikeMind001Products(html, productRef.url);
 
     return {
@@ -368,17 +371,22 @@ function parseNextData(html) {
 
 function parseNextProductData(nextData, productRef, sizeFilters) {
   const pageProps = nextData?.props?.pageProps || {};
+  const groupedProduct = findProductInGroups(pageProps.productGroups, productRef.styleColor);
+  const pageSelectedProduct = pageProps.selectedProduct || null;
   const selectedProduct =
-    pageProps.selectedProduct ||
-    findProductInGroups(pageProps.productGroups, productRef.styleColor) ||
+    groupedProduct ||
+    (String(pageSelectedProduct?.styleColor || '').toUpperCase() === productRef.styleColor
+      ? pageSelectedProduct
+      : null) ||
     null;
 
   if (!selectedProduct) return null;
 
   const product = buildProductFromNextData(selectedProduct, pageProps, productRef);
-  const productSoldOut = isNextProductSoldOut(selectedProduct);
+  const unavailableReason = nextProductUnavailableReason(selectedProduct);
+  const productUnavailable = Boolean(unavailableReason);
   const sizes = asArray(selectedProduct.sizes).map((size) => {
-    const available = !productSoldOut && isNextSizeAvailable(size);
+    const available = !productUnavailable && isNextSizeAvailable(size);
     const label = firstPresent([
       size.localizedLabel,
       withPrefix(size.localizedLabelPrefix, size.localizedLabel),
@@ -406,7 +414,10 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
     availableSizes,
     matchingSizes,
     inStock: matchingSizes.length > 0,
-    statusLabel: statusLabelFor(sizes, matchingSizes, sizeFilters),
+    statusLabel:
+      unavailableReason === 'coming-soon'
+        ? '販売開始前'
+        : statusLabelFor(sizes, matchingSizes, sizeFilters),
     source: 'nike-next-data',
   };
 }
@@ -437,15 +448,19 @@ function buildProductFromNextData(selectedProduct, pageProps, productRef) {
   };
 }
 
-function isNextProductSoldOut(product) {
+function nextProductUnavailableReason(product) {
   const featuredAttributes = asArray(product.featuredAttributes).join(' ');
   const statusModifier = String(product.statusModifier || '');
-  return /OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE/i.test(`${featuredAttributes} ${statusModifier}`);
+  const markers = `${featuredAttributes} ${statusModifier}`;
+  if (/COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers)) return 'coming-soon';
+  if (/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE/i.test(markers)) return 'out-of-stock';
+  return null;
 }
 
 function isNextSizeAvailable(size) {
   const status = String(size.status || '').toUpperCase();
-  return status && !/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE|INACTIVE/i.test(status);
+  // 未知の状態を在庫ありに倒すと誤通知になるため、購入可能と確認済みの状態だけを許可する。
+  return ['ACTIVE', 'AVAILABLE', 'IN_STOCK'].includes(status);
 }
 
 function formatNextPrice(price) {
@@ -598,6 +613,39 @@ function firstPresent(values) {
 function attrValue(attrs, name) {
   const pattern = new RegExp(`${name}=["']([^"']+)["']`, 'i');
   return decodeHtml(attrs.match(pattern)?.[1] || '');
+}
+
+function textByTestId(html, testId) {
+  const escapedTestId = escapeRegExp(testId);
+  const pattern = new RegExp(
+    `<([a-z0-9]+)\\b[^>]*data-testid=["']${escapedTestId}["'][^>]*>([\\s\\S]*?)<\\/\\1>`,
+    'i',
+  );
+  const body = html.match(pattern)?.[2] || '';
+  return decodeHtml(body.replace(/<[^>]+>/g, ' '));
+}
+
+function firstImageByTestId(html, testId) {
+  const escapedTestId = escapeRegExp(testId);
+  const marker = new RegExp(`data-testid=["']${escapedTestId}["']`, 'i');
+  const index = html.search(marker);
+  if (index === -1) return '';
+  const section = html.slice(index, index + 10000);
+  const attrs = section.match(/<img\\b([^>]*)>/i)?.[1] || '';
+  return attrValue(attrs, 'src');
+}
+
+function isParsedPageUsable(parsed, html, productRef) {
+  if (parsed?.source === 'nike-next-data') return true;
+  const title = String(parsed?.product?.title || '');
+  return (
+    html.toUpperCase().includes(productRef.styleColor) ||
+    /nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title)
+  );
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function asArray(value) {
