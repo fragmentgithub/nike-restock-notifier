@@ -88,8 +88,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          queued_count="$(gh run list --workflow pages.yml --status queued --limit 10 --json databaseId --jq 'length')"
-          if [ "$queued_count" -eq 0 ]; then
+          waiting_count=0
+          for status in queued pending waiting requested; do
+            count="$(gh run list --workflow pages.yml --status "$status" --limit 20 --json databaseId --jq 'length')"
+            waiting_count=$((waiting_count + count))
+          done
+          if [ "$waiting_count" -eq 0 ]; then
             gh workflow run pages.yml --ref main --repo ${{ github.repository }}
           else
             echo "A newer monitor run is already queued; skipping self-dispatch."
