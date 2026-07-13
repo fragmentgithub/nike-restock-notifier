@@ -6,6 +6,12 @@ import {
   DEFAULT_MIND_001_URLS,
   discoverNikeMind001Products,
 } from '../src/discovery.js';
+import {
+  applyCheckState,
+  collectMonitorErrors,
+  nextCycleDelayMs,
+  notificationDecision,
+} from '../src/monitor-state.js';
 
 const STATE_DIR = '.monitor-state';
 const STATE_PATH = `${STATE_DIR}/state.json`;
@@ -23,6 +29,7 @@ const config = {
   seedUrls: unique([...DEFAULT_MIND_001_URLS, ...configuredProductUrls]),
   discoveryUrl: process.env.DISCOVERY_URL || DEFAULT_DISCOVERY_URL,
   discoveryIntervalHours: clampNumber(process.env.DISCOVERY_INTERVAL_HOURS, 6, 1, 168),
+  discoveryRetryMinutes: clampNumber(process.env.DISCOVERY_RETRY_MINUTES, 30, 5, 360),
   sizeFilters: process.env.SIZE_FILTERS || '',
   intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 30, 1800),
   loopMinutes: clampNumber(process.env.LOOP_MINUTES, 25, 0, 340),
@@ -48,21 +55,28 @@ const deadline = Date.now() + config.loopMinutes * 60 * 1000;
 let cycles = 0;
 let checks = 0;
 let notifications = 0;
+state.consecutiveFailedCycles = Math.max(0, Number(state.consecutiveFailedCycles) || 0);
 
 await discoverProductsIfDue();
 
 for (;;) {
   cycles += 1;
-  const cycleStartedAt = Date.now();
   const products = trackedProducts();
+  let cycleFailures = 0;
 
   for (let index = 0; index < products.length; index += 1) {
     checks += 1;
     try {
-      const notified = await runCheck(products[index]);
-      if (notified) notifications += 1;
+      const outcome = await runCheck(products[index]);
+      if (outcome.notified) notifications += 1;
+      if (!outcome.ok) cycleFailures += 1;
     } catch (error) {
       const checkedAt = new Date().toISOString();
+      cycleFailures += 1;
+      products[index].lastRuntimeError = {
+        message: error.message || '監視処理でエラーが発生しました。',
+        at: checkedAt,
+      };
       pushEvent({
         id: `actions-error-${Date.now()}`,
         type: 'error',
@@ -70,7 +84,7 @@ for (;;) {
         at: checkedAt,
         result: null,
       });
-      await persist(checkedAt, 'Nikeの商品ページを確認できませんでした。');
+      await persist(checkedAt);
     }
 
     if (index < products.length - 1 && config.productCheckDelayMs > 0) {
@@ -78,9 +92,13 @@ for (;;) {
     }
   }
 
-  const nextCycleAt = cycleStartedAt + config.intervalSeconds * 1000;
-  if (nextCycleAt > deadline) break;
-  await sleep(Math.max(0, nextCycleAt - Date.now()));
+  state.consecutiveFailedCycles = cycleFailures
+    ? state.consecutiveFailedCycles + 1
+    : 0;
+  const waitMs = nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles);
+  await persist(new Date().toISOString());
+  if (Date.now() + waitMs > deadline) break;
+  await sleep(waitMs);
   await discoverProductsIfDue();
 }
 
@@ -94,6 +112,7 @@ console.log(
       intervalSeconds: config.intervalSeconds,
       loopMinutes: config.loopMinutes,
       lastDiscoveryAt: state.lastDiscoveryAt || null,
+      consecutiveFailedCycles: state.consecutiveFailedCycles,
     },
     null,
     2,
@@ -101,9 +120,16 @@ console.log(
 );
 
 async function discoverProductsIfDue() {
-  const lastDiscoveryAt = Date.parse(state.lastDiscoveryAt || '');
-  const discoveryAge = Date.now() - lastDiscoveryAt;
-  if (Number.isFinite(lastDiscoveryAt) && discoveryAge < config.discoveryIntervalHours * 3600 * 1000) {
+  const lastAttemptAt = Date.parse(state.lastDiscoveryAttemptAt || state.lastDiscoveryAt || '');
+  const lastSuccessAt = Date.parse(
+    state.lastDiscoverySuccessAt || (state.lastDiscoveryError ? '' : state.lastDiscoveryAt) || '',
+  );
+  const retryWaitMs = config.discoveryRetryMinutes * 60 * 1000;
+  const regularWaitMs = config.discoveryIntervalHours * 3600 * 1000;
+  const requiredWaitMs = state.lastDiscoveryError ? retryWaitMs : regularWaitMs;
+  const referenceTime = state.lastDiscoveryError ? lastAttemptAt : lastSuccessAt;
+
+  if (Number.isFinite(referenceTime) && Date.now() - referenceTime < requiredWaitMs) {
     return;
   }
 
@@ -113,6 +139,7 @@ async function discoverProductsIfDue() {
     timeoutMs: 20000,
   });
   state.lastDiscoveryAt = checkedAt;
+  state.lastDiscoveryAttemptAt = checkedAt;
   state.lastDiscoveryError = discovery.error;
 
   if (discovery.error) {
@@ -124,6 +151,7 @@ async function discoverProductsIfDue() {
       result: null,
     });
   } else {
+    state.lastDiscoverySuccessAt = checkedAt;
     const added = addKnownProducts(discovery.products, 'catalog');
     pushEvent({
       id: `discovery-${Date.now()}`,
@@ -136,7 +164,7 @@ async function discoverProductsIfDue() {
     });
   }
 
-  await persist(checkedAt, discovery.error ? '新カラー探索に失敗しました。既知の商品は監視を継続します。' : null);
+  await persist(checkedAt);
 }
 
 async function runCheck(entry) {
@@ -146,8 +174,7 @@ async function runCheck(entry) {
   });
   const checkedAt = result.checkedAt || new Date().toISOString();
   const styleColor = result.product?.styleColor || entry.styleColor;
-  const nextStockKey = stockKey(result.matchingSizes) || (result.inStock ? '__product__' : '');
-  const shouldNotify = result.inStock && nextStockKey && nextStockKey !== entry.lastStockKey;
+  const { nextStockKey, shouldNotify } = notificationDecision(entry, result);
   const relatedAdded = addKnownProducts(result.relatedProducts || [], 'product-page');
 
   if (relatedAdded.length) {
@@ -163,6 +190,9 @@ async function runCheck(entry) {
   const publicResult = withoutRelatedProducts(result);
   entry.lastResult = publicResult;
   entry.lastSeenAt = checkedAt;
+  entry.lastRuntimeError = result.ok
+    ? null
+    : { message: `${styleColor} を確認できませんでした。`, at: checkedAt };
   if (result.product?.url) entry.url = result.product.url;
 
   pushEvent({
@@ -205,17 +235,15 @@ async function runCheck(entry) {
     }
   }
 
-  if (!result.ok) {
-    // 一時的な取得失敗では通知済み状態を変更しない。復旧時の重複通知を防ぐ。
-  } else if (result.inStock) {
-    // 通知失敗時だけキーを更新せず、次のチェックで再送を試す。
-    if (!shouldNotify || notified || !config.discordWebhook) entry.lastStockKey = nextStockKey;
-  } else {
-    entry.lastStockKey = '';
-  }
+  applyCheckState(entry, result, {
+    nextStockKey,
+    shouldNotify,
+    notified,
+    webhookConfigured: Boolean(config.discordWebhook),
+  });
 
-  await persist(checkedAt, result.ok ? null : `${styleColor} を確認できませんでした。`);
-  return notified;
+  await persist(checkedAt);
+  return { notified, ok: result.ok };
 }
 
 function addKnownProducts(products, source) {
@@ -273,6 +301,7 @@ function normalizeKnownProducts(value) {
         lastSeenAt: product.lastSeenAt || null,
         lastStockKey: product.lastStockKey || '',
         lastResult: product.lastResult || null,
+        lastRuntimeError: product.lastRuntimeError || null,
       };
     } catch {
       // 壊れたキャッシュ項目は無視する。
@@ -285,9 +314,11 @@ function trackedProducts() {
   return Object.values(state.knownProducts).sort((a, b) => a.styleColor.localeCompare(b.styleColor));
 }
 
-async function persist(updatedAt, lastError) {
+async function persist(updatedAt) {
   state.events = events;
-  state.lastError = lastError;
+  const monitorErrors = collectMonitorErrors(trackedProducts(), state.lastDiscoveryError);
+  state.lastErrors = monitorErrors;
+  state.lastError = monitorErrors[0] || null;
 
   const products = trackedProducts().map((entry) => ({
     styleColor: entry.styleColor,
@@ -296,6 +327,7 @@ async function persist(updatedAt, lastError) {
     discoveredAt: entry.discoveredAt,
     lastSeenAt: entry.lastSeenAt,
     lastResult: entry.lastResult,
+    lastError: entry.lastRuntimeError?.message || (entry.lastResult?.ok === false ? entry.lastResult.statusLabel : null),
   }));
   const lastResult = products
     .map((product) => product.lastResult)
@@ -311,6 +343,7 @@ async function persist(updatedAt, lastError) {
       productCount: products.length,
       discoveryUrl: config.discoveryUrl,
       discoveryIntervalHours: config.discoveryIntervalHours,
+      discoveryRetryMinutes: config.discoveryRetryMinutes,
       sizeFilters: config.sizeFilters,
       intervalSeconds: config.intervalSeconds,
       loopMinutes: config.loopMinutes,
@@ -319,11 +352,13 @@ async function persist(updatedAt, lastError) {
     },
     discovery: {
       lastCheckedAt: state.lastDiscoveryAt || null,
+      lastSuccessAt: state.lastDiscoverySuccessAt || null,
       lastError: state.lastDiscoveryError || null,
     },
     products,
     lastResult,
-    lastError,
+    errors: monitorErrors,
+    lastError: state.lastError,
     events,
   };
 
@@ -377,14 +412,6 @@ function compactResult(result) {
     matchingSizes: result.matchingSizes,
     checkedAt: result.checkedAt,
   };
-}
-
-function stockKey(sizes = []) {
-  return sizes
-    .filter((size) => size.available)
-    .map((size) => size.label || size.id)
-    .sort()
-    .join('|');
 }
 
 async function sendDiscordNotification({ webhook, title, message, url, sizes, imageUrl }) {

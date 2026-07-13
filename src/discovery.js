@@ -37,8 +37,12 @@ export async function discoverNikeMind001Products(options = {}) {
     }
 
     const html = await response.text();
+    const products = extractNikeMind001Products(html, catalogUrl);
+    if (products.length === 0) {
+      throw new Error('Nike公式一覧からMind 001を1件も検出できませんでした');
+    }
     return {
-      products: extractNikeMind001Products(html, catalogUrl),
+      products,
       sourceUrl: catalogUrl,
       error: null,
     };

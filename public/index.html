@@ -17,59 +17,39 @@
       </section>
 
       <section class="layout">
-        <form class="panel settings-panel" id="settingsForm">
+        <section class="panel settings-panel">
           <div class="section-title">
             <h2>監視設定</h2>
-            <button type="button" class="icon-button" id="notifyButton" title="ブラウザ通知を許可">
-              <span aria-hidden="true">🔔</span>
-            </button>
+            <span class="small-status ok">GitHub Actions</span>
           </div>
 
-          <label>
-            <span>追加シード商品URL</span>
-            <input id="productUrl" name="productUrl" type="url" required />
-          </label>
-
-          <label>
-            <span>対象サイズ</span>
-            <input
-              id="sizeFilters"
-              name="sizeFilters"
-              type="text"
-              placeholder="例: 26, 26.5, 27 / 空欄なら全サイズ"
-            />
-          </label>
-
-          <div class="field-grid">
-            <label>
-              <span>確認間隔</span>
-              <div class="input-with-unit">
-                <input id="intervalSeconds" name="intervalSeconds" type="number" min="30" max="3600" step="30" />
-                <span>秒</span>
-              </div>
-            </label>
-            <label>
-              <span>Discord webhook</span>
-              <input id="discordWebhook" name="discordWebhook" type="url" placeholder="任意" />
-            </label>
+          <div class="settings-summary">
+            <div>
+              <span>対象サイズ</span>
+              <strong id="sizeFiltersDisplay">全サイズ</strong>
+            </div>
+            <div>
+              <span>巡回後の待機</span>
+              <strong id="intervalDisplay">-</strong>
+            </div>
+            <div>
+              <span>実行時間</span>
+              <strong id="loopDisplay">-</strong>
+            </div>
+            <div>
+              <span>Discord</span>
+              <strong id="discordDisplay">-</strong>
+            </div>
           </div>
 
-          <div class="actions">
-            <button type="submit" class="primary">保存</button>
-            <button type="button" id="startButton">開始</button>
-            <button type="button" id="stopButton">停止</button>
-            <button type="button" id="checkButton">今すぐ確認</button>
-          </div>
-
-          <p class="hint" id="webhookHint">Discord webhookは未設定です。</p>
           <p class="hint" id="discoveryHint">新カラー自動追尾: 初回探索待ち</p>
-          <div class="pages-links" id="pagesLinks" hidden>
+          <div class="pages-links">
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/pages.yml" target="_blank" rel="noreferrer">Monitor</a>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/discord-test.yml" target="_blank" rel="noreferrer">Discord Test</a>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/settings/secrets/actions" target="_blank" rel="noreferrer">Secrets</a>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/settings/variables/actions" target="_blank" rel="noreferrer">Variables</a>
           </div>
-        </form>
+        </section>
 
         <section class="panel current-panel">
           <div class="section-title">
@@ -103,7 +83,6 @@
       <section class="panel log-panel">
         <div class="section-title">
           <h2>履歴</h2>
-          <button type="button" id="testDiscordButton">Discordテスト</button>
         </div>
         <ol id="eventLog" class="event-log"></ol>
       </section>

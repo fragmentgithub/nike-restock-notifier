@@ -3,7 +3,7 @@ name: Nike Restock Monitor and Pages
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "7,37 * * * *"
   push:
     branches:
       - main
@@ -35,6 +35,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Run tests
+        run: npm test
+
       - name: Restore monitor state
         uses: actions/cache/restore@v4
         with:
@@ -52,6 +55,7 @@ jobs:
           LOOP_MINUTES: ${{ vars.LOOP_MINUTES }}
           DISCOVERY_URL: ${{ vars.DISCOVERY_URL }}
           DISCOVERY_INTERVAL_HOURS: ${{ vars.DISCOVERY_INTERVAL_HOURS }}
+          DISCOVERY_RETRY_MINUTES: ${{ vars.DISCOVERY_RETRY_MINUTES }}
           PRODUCT_CHECK_DELAY_MS: ${{ vars.PRODUCT_CHECK_DELAY_MS }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/monitor.js
@@ -83,4 +87,10 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yml --ref main --repo ${{ github.repository }}
+        run: |
+          queued_count="$(gh run list --workflow pages.yml --status queued --limit 10 --json databaseId --jq 'length')"
+          if [ "$queued_count" -eq 0 ]; then
+            gh workflow run pages.yml --ref main --repo ${{ github.repository }}
+          else
+            echo "A newer monitor run is already queued; skipping self-dispatch."
+          fi

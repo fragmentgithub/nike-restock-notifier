@@ -6,8 +6,8 @@
   "scripts": {
     "discord:test": "node scripts/test-discord.js",
     "monitor": "node scripts/monitor.js",
-    "start": "node server.js",
-    "test": "node --test test/discovery.test.js test/nike.test.js"
+    "start": "node scripts/serve-pages.js",
+    "test": "node --test test/discovery.test.js test/nike.test.js test/monitor-state.test.js"
   },
   "engines": {
     "node": ">=20"

@@ -193,6 +193,29 @@ input:focus {
   line-height: 1.5;
 }
 
+.settings-summary {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+.settings-summary div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.settings-summary span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-summary strong {
+  font-size: 14px;
+}
+
 .pages-links {
   display: flex;
   flex-wrap: wrap;
@@ -507,6 +530,7 @@ th {
   .metric-grid,
   .product-row,
   .product-card,
+  .settings-summary,
   .event-log li {
     grid-template-columns: 1fr;
   }
