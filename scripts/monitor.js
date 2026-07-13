@@ -10,7 +10,9 @@ import {
   applyCheckState,
   collectMonitorErrors,
   nextCycleDelayMs,
+  nextFailedCycleStreak,
   notificationDecision,
+  shouldStopDuringSweep,
 } from '../src/monitor-state.js';
 
 const STATE_DIR = '.monitor-state';
@@ -51,6 +53,7 @@ if (state.lastStockKey && state.knownProducts['HQ4307-005']?.lastStockKey === ''
 }
 delete state.lastStockKey;
 
+const singleSweep = config.loopMinutes === 0;
 const deadline = Date.now() + config.loopMinutes * 60 * 1000;
 let cycles = 0;
 let checks = 0;
@@ -63,9 +66,12 @@ for (;;) {
   cycles += 1;
   const products = trackedProducts();
   let cycleFailures = 0;
+  let checkedProducts = 0;
+  let completedSweep = true;
 
   for (let index = 0; index < products.length; index += 1) {
     checks += 1;
+    checkedProducts += 1;
     try {
       const outcome = await runCheck(products[index]);
       if (outcome.notified) notifications += 1;
@@ -89,7 +95,10 @@ for (;;) {
 
     // スイープ途中でも deadline を超えたら打ち切る。商品数が増えても最終スイープが
     // timeout-minutes を突き抜けてジョブが timeout/cancel されるのを防ぐ。
-    if (Date.now() >= deadline) break;
+    if (shouldStopDuringSweep({ singleSweep, deadline })) {
+      completedSweep = index === products.length - 1;
+      break;
+    }
 
     if (index < products.length - 1 && config.productCheckDelayMs > 0) {
       await sleep(config.productCheckDelayMs);
@@ -99,11 +108,15 @@ for (;;) {
   // バックオフは「全商品が失敗したサイクル」(＝ネットワーク障害/Nike側ブロック等)に限定する。
   // 1商品だけの恒久失敗(例: discovery が拾った色の delist=404)でフリート全体の巡回間隔が
   // 延び続けないようにする。
-  const allProductsFailed = products.length > 0 && cycleFailures === products.length;
-  state.consecutiveFailedCycles = allProductsFailed ? state.consecutiveFailedCycles + 1 : 0;
+  state.consecutiveFailedCycles = nextFailedCycleStreak(state.consecutiveFailedCycles, {
+    cycleFailures,
+    checkedProducts,
+    totalProducts: products.length,
+    completedSweep,
+  });
   const waitMs = nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles);
   await persist(new Date().toISOString());
-  if (Date.now() + waitMs > deadline) break;
+  if (singleSweep || Date.now() + waitMs > deadline) break;
   await sleep(waitMs);
   await discoverProductsIfDue();
 }

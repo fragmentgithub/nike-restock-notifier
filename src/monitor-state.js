@@ -38,7 +38,11 @@ export function applyCheckState(
   result,
   { nextStockKey, shouldNotify, notified, webhookConfigured },
 ) {
-  if (!result.ok) return entry.lastStockKey || '';
+  if (!result.ok) {
+    // 取得失敗は「在庫なし」の確認ではないため、連続 OOS 判定を中断する。
+    entry.oosStreak = 0;
+    return entry.lastStockKey || '';
+  }
 
   if (!result.inStock) {
     entry.oosStreak = (Number(entry.oosStreak) || 0) + 1;
@@ -60,6 +64,25 @@ export function nextCycleDelayMs(intervalSeconds, consecutiveFailedCycles, maxSe
   const failures = Math.max(0, Number(consecutiveFailedCycles) || 0);
   const multiplier = 2 ** Math.min(failures, 4);
   return Math.min(maxSeconds, baseSeconds * multiplier) * 1000;
+}
+
+export function nextFailedCycleStreak(
+  currentStreak,
+  { cycleFailures, checkedProducts, totalProducts, completedSweep },
+) {
+  const current = Math.max(0, Number(currentStreak) || 0);
+
+  // deadline で途中終了した巡回はフリート全体の成否を判定できないため、
+  // 既存のストリークを維持して次の完全な巡回へ判断を持ち越す。
+  if (!completedSweep || checkedProducts !== totalProducts) return current;
+
+  const allProductsFailed = totalProducts > 0 && cycleFailures === totalProducts;
+  return allProductsFailed ? current + 1 : 0;
+}
+
+export function shouldStopDuringSweep({ singleSweep, deadline, now = Date.now() }) {
+  // LOOP_MINUTES=0 は時間制限ではなく「全商品を1巡して終了」の単発モード。
+  return !singleSweep && now >= deadline;
 }
 
 export function collectMonitorErrors(products, discoveryError = '') {

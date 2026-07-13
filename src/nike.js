@@ -608,9 +608,8 @@ function firstImageByTestId(html, testId) {
 function isParsedPageUsable(parsed, html, productRef) {
   if (parsed?.source === 'nike-next-data') return true;
 
-  // \u5546\u54c1\u30bf\u30a4\u30c8\u30eb\u304c\u8aad\u3081\u3066\u3044\u308c\u3070\u6b63\u898f\u306e\u5546\u54c1\u30da\u30fc\u30b8\u3068\u307f\u306a\u3059\u3002
   const title = String(parsed?.product?.title || '');
-  if (/nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title)) return true;
+  const hasProductTitle = /nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title);
 
   // \u30b9\u30bf\u30a4\u30eb\u30ab\u30e9\u30fc\u306e\u6587\u5b57\u5217\u4e00\u81f4\u3060\u3051\u3092\u4fe1\u983c\u3059\u308b\u3068\u3001\u8981\u6c42URL\u3092\u672c\u6587\u3078\u53cd\u5c04\u3059\u308b
   // \u30d6\u30ed\u30c3\u30af/\u30a8\u30e9\u30fc\u30da\u30fc\u30b8\u3092\u300c\u4f7f\u7528\u53ef\u300d\u3068\u8aa4\u5224\u5b9a\u3057\u3001product_feed API\u3078\u306e\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\u3092
@@ -621,7 +620,9 @@ function isParsedPageUsable(parsed, html, productRef) {
     /id=["']size-selector["']|data-testid=["'](?:currentPrice-container|product_title)["']/i.test(
       html,
     );
-  return hasStyleColor && hasProductMarkers;
+  // タイトルやスタイルカラーだけでは SEO 情報を残したブロックページを正常ページと
+  // 誤認しうるため、実際の商品構造マーカーとの併存を必須にする。
+  return hasProductMarkers && (hasProductTitle || hasStyleColor);
 }
 
 function escapeRegExp(value) {
