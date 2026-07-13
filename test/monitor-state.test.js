@@ -34,6 +34,35 @@ test('在庫なしを正常確認した場合だけ通知済みキーを消す',
   assert.equal(entry.lastStockKey, '');
 });
 
+test('在庫サイズが減っただけでは再通知しない', () => {
+  const entry = { lastStockKey: '27|28' };
+  const result = {
+    ok: true,
+    inStock: true,
+    matchingSizes: [{ label: '27', available: true }],
+  };
+
+  const decision = notificationDecision(entry, result);
+  assert.equal(decision.nextStockKey, '27');
+  assert.equal(decision.shouldNotify, false);
+});
+
+test('新しく在庫になったサイズがあれば再通知する', () => {
+  const entry = { lastStockKey: '27' };
+  const result = {
+    ok: true,
+    inStock: true,
+    matchingSizes: [
+      { label: '27', available: true },
+      { label: '28', available: true },
+    ],
+  };
+
+  const decision = notificationDecision(entry, result);
+  assert.equal(decision.nextStockKey, '27|28');
+  assert.equal(decision.shouldNotify, true);
+});
+
 test('失敗が続くと巡回間隔を延ばし上限で止める', () => {
   assert.equal(nextCycleDelayMs(120, 0), 120000);
   assert.equal(nextCycleDelayMs(120, 1), 240000);

@@ -8,13 +8,20 @@ export function stockKey(sizes = []) {
 
 export function notificationDecision(entry, result) {
   const nextStockKey = stockKey(result.matchingSizes) || (result.inStock ? '__product__' : '');
+  const previousStockKey = String(entry.lastStockKey || '');
+  const previousSizes = new Set(previousStockKey.split('|').filter(Boolean));
+  const nextSizes = nextStockKey.split('|').filter(Boolean);
+  const hasNewSize =
+    previousStockKey !== '__product__' &&
+    nextStockKey !== '__product__' &&
+    nextSizes.some((size) => !previousSizes.has(size));
   return {
     nextStockKey,
     shouldNotify:
       result.ok === true &&
       result.inStock === true &&
       Boolean(nextStockKey) &&
-      nextStockKey !== String(entry.lastStockKey || ''),
+      (!previousStockKey || hasNewSize),
   };
 }
 

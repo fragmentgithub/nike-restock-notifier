@@ -74,11 +74,65 @@ test('Nike商品ではない200応答を成功扱いしない', async () => {
   }
 });
 
+test('HTML断片の未知サイズを購入ボタンなしで在庫扱いしない', async () => {
+  const html = `
+    <html>
+      <head><meta property="og:title" content="Nike Mind 001"></head>
+      <body>
+        <script>{"localizedSize":"27"}</script>
+        <p>近日発売</p>
+      </body>
+    </html>`;
+  const result = await checkWithResponses([
+    new Response(html),
+    new Response('{}'),
+    new Response('{}'),
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.inStock, false);
+  assert.equal(result.sizes[0].available, false);
+});
+
+test('API代替取得で指定カラーが無ければ別カラーを採用しない', async () => {
+  const apiPayload = {
+    objects: [{
+      productInfo: [{
+        merchProduct: { styleColor: 'HQ4307-003' },
+        productContent: { fullTitle: 'Nike Mind 001 wrong color' },
+        skus: [{ id: 'wrong-sku', localizedSize: '27' }],
+        availableSkus: [{ skuId: 'wrong-sku', level: 'HIGH' }],
+      }],
+    }],
+  };
+  const result = await checkWithResponses([
+    new Response('<html><title>Access Denied</title></html>'),
+    Response.json(apiPayload),
+    new Response('{}'),
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.inStock, false);
+  assert.equal(result.product.styleColor, 'HQ4307-005');
+});
+
 async function checkWithNextData(pageProps) {
   const originalFetch = globalThis.fetch;
   const payload = { props: { pageProps } };
   const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script>`;
   globalThis.fetch = async () => new Response(html);
+
+  try {
+    return await checkNikeStock(PRODUCT_URL);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function checkWithResponses(responses) {
+  const originalFetch = globalThis.fetch;
+  let index = 0;
+  globalThis.fetch = async () => responses[index++] || new Response('{}');
 
   try {
     return await checkNikeStock(PRODUCT_URL);

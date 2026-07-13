@@ -219,9 +219,7 @@ function parseProductFeed(payload, productRef, sizeFilters) {
     productInfos.find((info) => {
       const merchProduct = info?.merchProduct || {};
       return String(merchProduct.styleColor || '').toUpperCase() === productRef.styleColor;
-    }) ||
-    productInfos[0] ||
-    null;
+    }) || null;
 
   if (!matchingInfo) {
     return emptyParsedProduct(productRef, sizeFilters);
@@ -322,10 +320,12 @@ function parseProductPage(html, productRef, sizeFilters) {
   const pageText = decodeHtml(html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' '));
   const soldOut = /在庫なし|売り切れ|sold\s*out|out\s*of\s*stock/i.test(pageText);
   const addToCart = /カートに追加|バッグに追加|add\s+to\s+bag|add\s+to\s+cart/i.test(pageText);
-  const sizes = [...extractSizesFromHtmlControls(html), ...extractSizesFromJsonFragments(html)].map((size) => ({
-    ...size,
-    available: addToCart && !soldOut ? size.available : size.available && !soldOut,
-  }));
+  const sizes = [...extractSizesFromHtmlControls(html), ...extractSizesFromJsonFragments(html)].map(
+    (size) => ({
+      ...size,
+      available: addToCart && !soldOut && size.available,
+    }),
+  );
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
 
@@ -550,7 +550,8 @@ function extractSizesFromJsonFragments(html) {
         localizedSize: label,
         nikeSize: label,
         size: label,
-        available: !nearSoldOutText(html, match.index || 0),
+        // JSON断片だけでは、そのサイズを今購入できるか確定できない。
+        available: false,
         level: nearSoldOutText(html, match.index || 0) ? 'OOS' : 'UNKNOWN',
       });
     }
