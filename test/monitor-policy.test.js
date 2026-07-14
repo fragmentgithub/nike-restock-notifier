@@ -8,6 +8,7 @@ import {
   parseProductConfigSafely,
   recordStockTransition,
   settingsForProduct,
+  shouldCheckProductNow,
   updateDelistState,
   updateCatalogPresence,
 } from '../src/monitor-policy.js';
@@ -27,6 +28,12 @@ test('商品別サイズ・通知・メンション設定を正規化する', ()
 test('商品別の空サイズ設定でグローバルフィルターを上書きできる', () => {
   const parsed = parseProductConfig(JSON.stringify({ 'HQ4307-005': { sizes: [] } }));
   assert.equal(settingsForProduct(parsed, 'HQ4307-005', '27').sizeFilters, '');
+});
+
+test('商品別設定でサイズを省略した場合はグローバルフィルターを継承する', () => {
+  const parsed = parseProductConfig(JSON.stringify({ 'HQ4307-005': { notify: false } }));
+  assert.equal(settingsForProduct(parsed, 'HQ4307-005', '27,28').sizeFilters, '27,28');
+  assert.equal(settingsForProduct(parsed, 'HQ4307-005', '27,28').notify, false);
 });
 
 test('商品別設定JSONが不正なら安全のため例外にする', () => {
@@ -103,6 +110,27 @@ test('発売前商品だけ短い間隔で再確認する', () => {
     ...common,
     lastResult: { availabilityState: 'coming-soon' },
   }, { now, upcomingIntervalSeconds: 30 }), 0);
+});
+
+test('単発モードでも休止商品は再確認時刻まで待つ', () => {
+  const now = Date.parse('2026-01-02T00:00:00Z');
+  const active = { lastSeenAt: '2026-01-01T23:59:30Z', pausedAt: null };
+  const paused = {
+    lastSeenAt: '2026-01-01T23:00:00Z',
+    pausedAt: '2026-01-01T00:00:00Z',
+  };
+
+  assert.equal(shouldCheckProductNow(active, { now, singleSweep: true }), true);
+  assert.equal(shouldCheckProductNow(paused, {
+    now,
+    singleSweep: true,
+    pausedRecheckHours: 24,
+  }), false);
+  assert.equal(shouldCheckProductNow(paused, {
+    now: Date.parse('2026-01-02T23:00:00Z'),
+    singleSweep: true,
+    pausedRecheckHours: 24,
+  }), true);
 });
 
 test('直近24時間の成功率と平均応答時間を集計する', () => {

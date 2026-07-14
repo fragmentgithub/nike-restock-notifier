@@ -20,12 +20,15 @@ export function parseProductConfig(value) {
     const settings = rawSettings && typeof rawSettings === 'object' && !Array.isArray(rawSettings)
       ? rawSettings
       : { sizes: rawSettings };
-    normalized[styleColor] = {
-      sizeFilters: normalizeSizeFilters(settings.sizes ?? settings.sizeFilters),
+    const normalizedSettings = {
       notify: settings.notify !== false,
       enabled: settings.enabled !== false,
       mention: normalizeDiscordMention(settings.mention),
     };
+    if (Object.hasOwn(settings, 'sizes') || Object.hasOwn(settings, 'sizeFilters')) {
+      normalizedSettings.sizeFilters = normalizeSizeFilters(settings.sizes ?? settings.sizeFilters);
+    }
+    normalized[styleColor] = normalizedSettings;
   }
   return normalized;
 }
@@ -164,6 +167,11 @@ export function millisecondsUntilProductDue(
       ? Math.max(15, Number(upcomingIntervalSeconds) || 30) * 1000
       : Math.max(30, Number(normalIntervalSeconds) || 120) * 1000;
   return Math.max(0, lastChecked + intervalMs - now);
+}
+
+export function shouldCheckProductNow(entry, { singleSweep = false, ...scheduleOptions } = {}) {
+  if (singleSweep && !entry?.pausedAt) return true;
+  return millisecondsUntilProductDue(entry, scheduleOptions) <= 0;
 }
 
 export function isUpcomingPriority(entry, now = Date.now(), upcomingWindowMinutes = 180) {

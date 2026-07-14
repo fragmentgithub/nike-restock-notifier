@@ -23,6 +23,7 @@ import {
   parseProductConfigSafely,
   recordStockTransition,
   settingsForProduct,
+  shouldCheckProductNow,
   updateDelistState,
   updateCatalogPresence,
 } from '../src/monitor-policy.js';
@@ -438,7 +439,10 @@ function monitorableProducts() {
 
 function productsDueForCheck(now = Date.now()) {
   return monitorableProducts()
-    .filter((entry) => singleSweep || millisecondsUntilProductDue(entry, schedulingOptions(now)) <= 0)
+    .filter((entry) => shouldCheckProductNow(entry, {
+      singleSweep,
+      ...schedulingOptions(now),
+    }))
     .sort((a, b) => {
       const priority = Number(isUpcomingPriority(b, now, config.upcomingWindowMinutes))
         - Number(isUpcomingPriority(a, now, config.upcomingWindowMinutes));
