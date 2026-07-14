@@ -11,6 +11,15 @@ const lastChecked = document.querySelector('#lastChecked');
 const nextCheck = document.querySelector('#nextCheck');
 const productGrid = document.querySelector('#productGrid');
 const eventLog = document.querySelector('#eventLog');
+const stockHistory = document.querySelector('#stockHistory');
+const qualityStatus = document.querySelector('#qualityStatus');
+const successRate = document.querySelector('#successRate');
+const averageResponse = document.querySelector('#averageResponse');
+const checks24h = document.querySelector('#checks24h');
+const lastSuccess = document.querySelector('#lastSuccess');
+const activeProductCount = document.querySelector('#activeProductCount');
+const pausedProductCount = document.querySelector('#pausedProductCount');
+const monitorErrorHint = document.querySelector('#monitorErrorHint');
 
 await refreshState();
 setInterval(refreshState, 60000);
@@ -30,7 +39,9 @@ function render(state) {
   const products = normalizedProducts(state);
   const results = products.map((item) => item.lastResult).filter(Boolean);
   const latestCheckedAt = latestDate(results.map((result) => result.checkedAt));
-  const availableCount = results.filter((result) => result.inStock).length;
+  const availableCount = products.filter((item) =>
+    item.settings?.enabled !== false && !item.pausedAt && item.lastResult?.inStock,
+  ).length;
   const monitorErrors = Array.isArray(state.errors)
     ? state.errors
     : state.lastError
@@ -38,7 +49,10 @@ function render(state) {
       : [];
   const stale = isStatusStale(state, config, products);
 
-  sizeFiltersDisplay.textContent = config.sizeFilters || '全サイズ';
+  const overrideCount = Object.keys(config.productOverrides || {}).length;
+  sizeFiltersDisplay.textContent = overrideCount
+    ? `${config.sizeFilters || '全サイズ'} / 商品別${overrideCount}件`
+    : config.sizeFilters || '全サイズ';
   intervalDisplay.textContent = `${Number(config.intervalSeconds || 120)}秒`;
   loopDisplay.textContent = `${Number(config.loopMinutes || 25)}分`;
   discordDisplay.textContent = config.discordWebhookSet ? '通知設定済み' : '未設定';
@@ -54,6 +68,8 @@ function render(state) {
   runStatus.className = `status-pill ${stale ? 'error' : 'running'}`;
   checkStatus.textContent = monitorErrors.length ? `${monitorErrors.length}件エラー` : '正常';
   checkStatus.className = `small-status ${monitorErrors.length ? 'error' : 'ok'}`;
+  monitorErrorHint.hidden = monitorErrors.length === 0;
+  monitorErrorHint.textContent = monitorErrors.join(' / ');
 
   productCount.textContent = String(products.length);
   availableProductCount.textContent = String(availableCount);
@@ -65,6 +81,8 @@ function render(state) {
   nextCheck.textContent = `巡回完了後 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`;
 
   renderProducts(products);
+  renderQuality(state.metrics || {});
+  renderStockHistory(state.history || []);
   renderEvents(state.events || []);
 }
 
@@ -77,7 +95,15 @@ function renderUnavailable(message) {
   availableProductCount.textContent = '-';
   lastChecked.textContent = '-';
   nextCheck.textContent = '-';
+  monitorErrorHint.hidden = false;
+  monitorErrorHint.textContent = `ステータス取得エラー: ${message}`;
   productGrid.innerHTML = `<p class="empty-state">ステータスを取得できません: ${escapeHtml(message)}</p>`;
+  qualityStatus.textContent = '取得失敗';
+  qualityStatus.className = 'small-status error';
+  for (const element of [successRate, averageResponse, checks24h, lastSuccess, activeProductCount, pausedProductCount]) {
+    element.textContent = '-';
+  }
+  stockHistory.innerHTML = '<li><span>-</span><strong>履歴を取得できません。</strong></li>';
   eventLog.innerHTML = '<li><span>-</span><strong>履歴を取得できません。</strong></li>';
 }
 
@@ -87,6 +113,11 @@ function normalizedProducts(state) {
       styleColor: item.styleColor || item.lastResult?.product?.styleColor || '',
       url: item.url || item.lastResult?.product?.url || '#',
       discoveredAt: item.discoveredAt || null,
+      pausedAt: item.pausedAt || null,
+      pausedReason: item.pausedReason || '',
+      settings: item.settings || { sizeFilters: '', notify: true, enabled: true },
+      stockHistory: item.stockHistory || [],
+      metrics: item.metrics || {},
       lastError: item.lastError || null,
       lastResult: item.lastResult || null,
     }));
@@ -117,19 +148,32 @@ function renderProducts(products) {
     const availableSizes = sizes.filter((size) => size.available);
     const title = product.title || `Nike Mind 001 ${item.styleColor}`;
     const subtitle = [product.subtitle, item.styleColor, product.price].filter(Boolean).join(' / ');
-    const status = item.lastError || result?.statusLabel || '初回確認待ち';
-    const statusClass = result?.inStock ? 'available' : item.lastError || result?.ok === false ? 'error' : '';
+    const disabled = item.settings?.enabled === false;
+    const paused = Boolean(item.pausedAt);
+    const status = disabled
+      ? '設定で無効'
+      : paused
+        ? '販売終了候補・自動休止'
+        : item.lastError || result?.statusLabel || '初回確認待ち';
+    const statusClass = result?.inStock && !paused && !disabled
+      ? 'available'
+      : item.lastError || result?.ok === false || paused || disabled
+        ? 'error'
+        : '';
     const sizeText = availableSizes.length
       ? availableSizes.map((size) => size.label).join(', ')
       : sizes.length
         ? '在庫ありサイズなし'
         : 'サイズ情報待ち';
     const url = safeUrl(product.url || item.url);
+    const imageUrl = safeUrl(product.imageUrl || '');
+    const configuredSizes = item.settings?.sizeFilters || '全サイズ';
+    const notifyLabel = item.settings?.notify === false ? '通知OFF' : '通知ON';
 
     return `
       <article class="product-card">
         <a class="product-card-image" href="${escapeHtml(url)}" target="_blank" rel="noreferrer">
-          ${product.imageUrl ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(title)}" loading="lazy" />` : '<span>NO IMAGE</span>'}
+          ${imageUrl !== '#' ? `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(title)}" loading="lazy" />` : '<span>NO IMAGE</span>'}
         </a>
         <div class="product-card-body">
           <div class="product-card-heading">
@@ -141,6 +185,7 @@ function renderProducts(products) {
           </div>
           <p class="product-subtitle">${escapeHtml(subtitle)}</p>
           <p class="size-summary"><strong>在庫サイズ</strong> ${escapeHtml(sizeText)}</p>
+          <p class="product-policy"><strong>監視対象</strong> ${escapeHtml(configuredSizes)} / ${escapeHtml(notifyLabel)} / 成功率 ${formatPercent(item.metrics?.successRate)}</p>
           <div class="product-card-footer">
             <span>${result?.checkedAt ? `確認 ${formatDate(result.checkedAt)}` : '未確認'}</span>
             <a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">商品ページ</a>
@@ -148,6 +193,35 @@ function renderProducts(products) {
         </div>
       </article>`;
   }).join('');
+}
+
+function renderQuality(metrics) {
+  const hasChecks = Number(metrics.checks) > 0;
+  const healthy = hasChecks && Number(metrics.successRate) >= 90;
+  qualityStatus.textContent = hasChecks ? (healthy ? '良好' : '要確認') : '集計待ち';
+  qualityStatus.className = `small-status ${healthy ? 'ok' : hasChecks ? 'error' : ''}`;
+  successRate.textContent = formatPercent(metrics.successRate);
+  averageResponse.textContent = metrics.averageResponseMs !== null
+    && metrics.averageResponseMs !== undefined
+    && Number.isFinite(Number(metrics.averageResponseMs))
+    ? `${Number(metrics.averageResponseMs).toLocaleString('ja-JP')}ms`
+    : '-';
+  checks24h.textContent = Number(metrics.checks || 0).toLocaleString('ja-JP');
+  lastSuccess.textContent = metrics.lastSuccessAt ? formatDate(metrics.lastSuccessAt) : '-';
+  activeProductCount.textContent = String(metrics.activeProducts ?? '-');
+  pausedProductCount.textContent = String(metrics.pausedProducts ?? '-');
+}
+
+function renderStockHistory(items) {
+  if (!items.length) {
+    stockHistory.innerHTML = '<li><span>-</span><strong>在庫変化はまだありません。</strong></li>';
+    return;
+  }
+  stockHistory.innerHTML = items.slice(0, 50).map((item) => `
+    <li>
+      <span>${formatDate(item.at)}</span>
+      <strong>${escapeHtml(item.message)}</strong>
+    </li>`).join('');
 }
 
 function renderEvents(events) {
@@ -164,7 +238,7 @@ function renderEvents(events) {
 }
 
 function isStatusStale(state, config, products) {
-  const lastCheckedAt = latestDate(products.map((item) => item.lastResult?.checkedAt)) || state.updatedAt;
+  const lastCheckedAt = state.updatedAt || latestDate(products.map((item) => item.lastResult?.checkedAt));
   if (!lastCheckedAt) return false;
   const intervalSeconds = Number(config.intervalSeconds || 120);
   const loopMinutes = Number(config.loopMinutes || 25);
@@ -193,6 +267,7 @@ function formatDate(value) {
 }
 
 function safeUrl(value) {
+  if (!String(value || '').trim()) return '#';
   try {
     const url = new URL(value, 'https://www.nike.com');
     if (url.protocol === 'http:' || url.protocol === 'https:') return url.toString();
@@ -200,6 +275,11 @@ function safeUrl(value) {
     // 不正なURLは下でフォールバックする。
   }
   return '#';
+}
+
+function formatPercent(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)}%` : '-';
 }
 
 function escapeHtml(value) {

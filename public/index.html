@@ -76,8 +76,32 @@
             </div>
           </div>
 
+          <p class="hint error-hint" id="monitorErrorHint" hidden></p>
+
           <div class="product-grid" id="productGrid"></div>
         </section>
+      </section>
+
+      <section class="panel insights-panel">
+        <div class="section-title">
+          <h2>監視品質（直近24時間）</h2>
+          <div class="small-status" id="qualityStatus">集計待ち</div>
+        </div>
+        <div class="metric-grid quality-grid">
+          <div><span>成功率</span><strong id="successRate">-</strong></div>
+          <div><span>平均応答</span><strong id="averageResponse">-</strong></div>
+          <div><span>確認回数</span><strong id="checks24h">-</strong></div>
+          <div><span>最終成功</span><strong id="lastSuccess">-</strong></div>
+          <div><span>稼働中商品</span><strong id="activeProductCount">-</strong></div>
+          <div><span>自動休止</span><strong id="pausedProductCount">-</strong></div>
+        </div>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="section-title">
+          <h2>在庫変化履歴</h2>
+        </div>
+        <ol id="stockHistory" class="event-log"></ol>
       </section>
 
       <section class="panel log-panel">

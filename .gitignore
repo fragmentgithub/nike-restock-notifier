@@ -1,5 +1,6 @@
 data/*.json
 .monitor-state/
+.health-state/
 node_modules/
 .DS_Store
 Thumbs.db

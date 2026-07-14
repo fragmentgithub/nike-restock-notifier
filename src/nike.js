@@ -92,6 +92,7 @@ export async function checkNikeStock(productUrl, options = {}) {
   const productRef = parseNikeProductUrl(productUrl);
   const sizeFilters = normalizeSizeFilters(options.sizeFilters);
   const errors = [];
+  let explicitNotFound = false;
 
   try {
     const response = await fetchWithTimeout(productRef.url, {
@@ -103,6 +104,7 @@ export async function checkNikeStock(productUrl, options = {}) {
     });
 
     if (!response.ok) {
+      explicitNotFound = response.status === 404 || response.status === 410;
       await response.body?.cancel();
       throw new Error(`${response.status} ${response.statusText}`);
     }
@@ -121,6 +123,7 @@ export async function checkNikeStock(productUrl, options = {}) {
       source: parsed.source || 'nike-product-page',
       sourceUrl: productRef.url,
       relatedProducts,
+      notFound: false,
       errors,
     };
   } catch (error) {
@@ -150,6 +153,7 @@ export async function checkNikeStock(productUrl, options = {}) {
           checkedAt: new Date().toISOString(),
           source: 'nike-product-api',
           sourceUrl: endpoint,
+          notFound: false,
           errors,
         };
       }
@@ -178,7 +182,10 @@ export async function checkNikeStock(productUrl, options = {}) {
     matchingSizes: [],
     inStock: false,
     statusLabel: '確認できません',
+    availabilityState: 'unknown',
+    releaseAt: null,
     relatedProducts: [],
+    notFound: explicitNotFound,
     errors,
   };
 }
@@ -226,6 +233,8 @@ function parseProductFeed(payload, productRef, sizeFilters) {
     matchingSizes,
     inStock: matchingSizes.length > 0,
     statusLabel: statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState: matchingSizes.length > 0 ? 'available' : 'out-of-stock',
+    releaseAt: null,
   };
 }
 
@@ -339,6 +348,8 @@ function parseProductPage(html, productRef, sizeFilters) {
           : addToCart && !soldOut
           ? '販売中の可能性あり'
           : '在庫なし、またはページから判定不可',
+    availabilityState: addToCart && !soldOut ? 'available' : soldOut ? 'out-of-stock' : 'unknown',
+    releaseAt: null,
   };
 }
 
@@ -358,6 +369,7 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
   const product = buildProductFromNextData(selectedProduct, pageProps, productRef);
   const unavailableReason = nextProductUnavailableReason(selectedProduct);
   const productUnavailable = Boolean(unavailableReason);
+  const releaseAt = nextProductReleaseAt(selectedProduct);
   const sizes = asArray(selectedProduct.sizes).map((size) => {
     const available = !productUnavailable && isNextSizeAvailable(size);
     const label = firstPresent([
@@ -391,6 +403,8 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
       unavailableReason === 'coming-soon'
         ? '販売開始前'
         : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState: unavailableReason || (matchingSizes.length > 0 ? 'available' : 'out-of-stock'),
+    releaseAt,
     source: 'nike-next-data',
   };
 }
@@ -427,6 +441,22 @@ function nextProductUnavailableReason(product) {
   const markers = `${featuredAttributes} ${statusModifier}`;
   if (/COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers)) return 'coming-soon';
   if (/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE/i.test(markers)) return 'out-of-stock';
+  return null;
+}
+
+function nextProductReleaseAt(product) {
+  const values = [
+    product?.launchDate,
+    product?.commerceStartDate,
+    product?.productInfo?.launchDate,
+    product?.productInfo?.commerceStartDate,
+    product?.merchProduct?.commerceStartDate,
+    product?.merchProduct?.publishStartDate,
+  ];
+  for (const value of values) {
+    const timestamp = Date.parse(value || '');
+    if (Number.isFinite(timestamp)) return new Date(timestamp).toISOString();
+  }
   return null;
 }
 

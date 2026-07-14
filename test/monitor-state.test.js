@@ -104,6 +104,7 @@ test('新しく在庫になったサイズがあれば再通知する', () => {
 
   const decision = notificationDecision(entry, result);
   assert.equal(decision.nextStockKey, '27|28');
+  assert.deepEqual(decision.addedSizes, ['28']);
   assert.equal(decision.shouldNotify, true);
 });
 
@@ -114,13 +115,22 @@ test('失敗が続くと巡回間隔を延ばし上限で止める', () => {
   assert.equal(nextCycleDelayMs(120, 4), 600000);
 });
 
-test('deadlineで途中終了した巡回は失敗ストリークを変更しない', () => {
+test('deadlineで途中終了し確認商品が全失敗なら失敗ストリークを維持する', () => {
   assert.equal(nextFailedCycleStreak(3, {
     cycleFailures: 2,
     checkedProducts: 2,
     totalProducts: 8,
     completedSweep: false,
   }), 3);
+});
+
+test('deadlineで途中終了しても成功商品があれば失敗ストリークをリセットする', () => {
+  assert.equal(nextFailedCycleStreak(3, {
+    cycleFailures: 1,
+    checkedProducts: 2,
+    totalProducts: 8,
+    completedSweep: false,
+  }), 0);
 });
 
 test('完全な全商品失敗だけ失敗ストリークを増やす', () => {

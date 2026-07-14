@@ -23,8 +23,13 @@ export function notificationDecision(entry, result) {
   // 汎用の在庫あり(__product__)から、具体的な購入可能サイズが初めて判明した遷移も通知する。
   const firstConcreteSizes =
     previousStockKey === '__product__' && nextStockKey !== '__product__' && nextSizes.length > 0;
+  const addedSizes = previousStockKey === '__product__'
+    ? nextSizes
+    : nextSizes.filter((size) => !previousSizes.has(size));
   return {
     nextStockKey,
+    previousStockKey,
+    addedSizes,
     shouldNotify:
       result.ok === true &&
       result.inStock === true &&
@@ -72,8 +77,12 @@ export function nextFailedCycleStreak(
 ) {
   const current = Math.max(0, Number(currentStreak) || 0);
 
+  // 部分巡回でも1商品以上成功していれば「全商品失敗」の連続性は明確に切れる。
+  if (checkedProducts > cycleFailures) return 0;
+
   // deadline で途中終了した巡回はフリート全体の成否を判定できないため、
-  // 既存のストリークを維持して次の完全な巡回へ判断を持ち越す。
+  // 確認した商品がすべて失敗した場合だけ、既存のストリークを維持して
+  // 次の完全な巡回へ判断を持ち越す。
   if (!completedSweep || checkedProducts !== totalProducts) return current;
 
   const allProductsFailed = totalProducts > 0 && cycleFailures === totalProducts;

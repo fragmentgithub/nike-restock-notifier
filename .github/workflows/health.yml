@@ -1,0 +1,49 @@
+name: Monitor Health Watchdog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor-health-watchdog
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Restore health state
+        uses: actions/cache/restore@v6
+        with:
+          path: .health-state
+          key: nike-health-state-${{ github.run_id }}
+          restore-keys: |
+            nike-health-state-
+
+      - name: Check monitor freshness
+        env:
+          STATUS_URL: ${{ vars.STATUS_URL }}
+          HEALTH_STALE_MINUTES: ${{ vars.HEALTH_STALE_MINUTES }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: node scripts/check-health.js
+
+      - name: Save health state
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: .health-state
+          key: nike-health-state-${{ github.run_id }}

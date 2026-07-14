@@ -9,6 +9,7 @@ test('COMING_SOONでサイズがACTIVEでも在庫ありにしない', async () 
     selectedProduct: product('HQ4307-005', {
       statusModifier: 'NOTIFY_ME',
       featuredAttributes: ['COMING_SOON', 'LAUNCH'],
+      launchDate: '2026-08-01T01:00:00Z',
       sizes: [size('27', 'ACTIVE')],
     }),
   });
@@ -16,6 +17,8 @@ test('COMING_SOONでサイズがACTIVEでも在庫ありにしない', async () 
   assert.equal(result.ok, true);
   assert.equal(result.inStock, false);
   assert.equal(result.statusLabel, '販売開始前');
+  assert.equal(result.availabilityState, 'coming-soon');
+  assert.equal(result.releaseAt, '2026-08-01T01:00:00.000Z');
   assert.equal(result.sizes[0].available, false);
 });
 
@@ -72,6 +75,17 @@ test('Nike商品ではない200応答を成功扱いしない', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('商品ページの404を販売終了候補として返す', async () => {
+  const result = await checkWithResponses([
+    new Response('Not found', { status: 404 }),
+    new Response('{}'),
+    new Response('{}'),
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.notFound, true);
 });
 
 test('HTML断片の未知サイズを購入ボタンなしで在庫扱いしない', async () => {
@@ -180,6 +194,7 @@ function product(styleColor, overrides = {}) {
     },
     statusModifier: overrides.statusModifier || '',
     featuredAttributes: overrides.featuredAttributes || [],
+    launchDate: overrides.launchDate,
     sizes: overrides.sizes || [],
   };
 }

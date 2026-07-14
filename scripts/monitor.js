@@ -14,14 +14,32 @@ import {
   notificationDecision,
   shouldStopDuringSweep,
 } from '../src/monitor-state.js';
+import {
+  applyRuntimeFailure,
+  computeQualityMetrics,
+  isUpcomingPriority,
+  millisecondsUntilProductDue,
+  normalizeDiscordMention,
+  parseProductConfigSafely,
+  recordStockTransition,
+  settingsForProduct,
+  updateDelistState,
+  updateCatalogPresence,
+} from '../src/monitor-policy.js';
 
 const STATE_DIR = '.monitor-state';
 const STATE_PATH = `${STATE_DIR}/state.json`;
 const STATUS_PATH = 'public/status.json';
 const MAX_EVENTS = 80;
+const MAX_HISTORY = 300;
+const MAX_CHECK_SAMPLES = 10000;
 
 const configuredProductUrls = splitUrls(process.env.PRODUCT_URLS);
 if (process.env.PRODUCT_URL) configuredProductUrls.push(process.env.PRODUCT_URL);
+const productConfigResult = parseProductConfigSafely(process.env.PRODUCT_CONFIG_JSON);
+if (productConfigResult.error) {
+  console.warn(`${productConfigResult.error}; monitoring and notifications are disabled.`);
+}
 
 const config = {
   productUrl:
@@ -36,6 +54,13 @@ const config = {
   intervalSeconds: clampNumber(process.env.INTERVAL_SECONDS, 120, 30, 1800),
   loopMinutes: clampNumber(process.env.LOOP_MINUTES, 25, 0, 340),
   productCheckDelayMs: clampNumber(process.env.PRODUCT_CHECK_DELAY_MS, 1500, 0, 30000),
+  productConfig: productConfigResult.config,
+  productConfigError: productConfigResult.error,
+  delistFailureThreshold: clampNumber(process.env.DELIST_FAILURE_THRESHOLD, 12, 3, 100),
+  pausedRecheckHours: clampNumber(process.env.PAUSED_RECHECK_HOURS, 24, 1, 168),
+  upcomingIntervalSeconds: clampNumber(process.env.UPCOMING_INTERVAL_SECONDS, 30, 15, 600),
+  upcomingWindowMinutes: clampNumber(process.env.UPCOMING_WINDOW_MINUTES, 180, 15, 1440),
+  discordMention: normalizeDiscordMention(process.env.DISCORD_MENTION),
   discordWebhook: validateWebhook(process.env.DISCORD_WEBHOOK || ''),
 };
 
@@ -44,6 +69,8 @@ await mkdir(STATE_DIR, { recursive: true });
 const state = await readJson(STATE_PATH, {});
 state.knownProducts = normalizeKnownProducts(state.knownProducts);
 const events = Array.isArray(state.events) ? state.events.slice(0, MAX_EVENTS) : [];
+const history = Array.isArray(state.history) ? state.history.slice(0, MAX_HISTORY) : [];
+state.checkSamples = normalizeCheckSamples(state.checkSamples);
 
 for (const url of config.seedUrls) addKnownProduct({ url }, 'initial');
 
@@ -60,29 +87,33 @@ let checks = 0;
 let notifications = 0;
 state.consecutiveFailedCycles = Math.max(0, Number(state.consecutiveFailedCycles) || 0);
 
-await discoverProductsIfDue();
+if (!config.productConfigError) await discoverProductsIfDue();
 
 for (;;) {
   cycles += 1;
-  const products = trackedProducts();
+  const activeFleet = monitorableProducts().filter((product) => !product.pausedAt);
+  const products = productsDueForCheck();
   let cycleFailures = 0;
   let checkedProducts = 0;
   let completedSweep = true;
 
   for (let index = 0; index < products.length; index += 1) {
+    const countedAsActive = !products[index].pausedAt;
+    const attemptStartedAt = Date.now();
     checks += 1;
-    checkedProducts += 1;
+    if (countedAsActive) checkedProducts += 1;
     try {
       const outcome = await runCheck(products[index]);
       if (outcome.notified) notifications += 1;
-      if (!outcome.ok) cycleFailures += 1;
+      if (countedAsActive && !outcome.ok) cycleFailures += 1;
     } catch (error) {
       const checkedAt = new Date().toISOString();
-      cycleFailures += 1;
-      products[index].lastRuntimeError = {
-        message: error.message || '監視処理でエラーが発生しました。',
-        at: checkedAt,
-      };
+      if (countedAsActive) cycleFailures += 1;
+      const sample = applyRuntimeFailure(products[index], error, {
+        checkedAt,
+        durationMs: Date.now() - attemptStartedAt,
+      });
+      recordCheckSample(sample);
       pushEvent({
         id: `actions-error-${Date.now()}`,
         type: 'error',
@@ -111,14 +142,18 @@ for (;;) {
   state.consecutiveFailedCycles = nextFailedCycleStreak(state.consecutiveFailedCycles, {
     cycleFailures,
     checkedProducts,
-    totalProducts: products.length,
-    completedSweep,
+    totalProducts: activeFleet.length,
+    completedSweep: completedSweep && checkedProducts === activeFleet.length,
   });
-  const waitMs = nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles);
+  const scheduledWaitMs = nextScheduledWaitMs();
+  const failureWaitMs = state.consecutiveFailedCycles > 0
+    ? nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles)
+    : 0;
+  const waitMs = Math.max(1000, scheduledWaitMs, failureWaitMs);
   await persist(new Date().toISOString());
   if (singleSweep || Date.now() + waitMs > deadline) break;
   await sleep(waitMs);
-  await discoverProductsIfDue();
+  if (!config.productConfigError) await discoverProductsIfDue();
 }
 
 console.log(
@@ -172,6 +207,16 @@ async function discoverProductsIfDue() {
   } else {
     state.lastDiscoverySuccessAt = checkedAt;
     const added = addKnownProducts(discovery.products, 'catalog');
+    const reprobe = updateCatalogPresence(trackedProducts(), discovery.products, checkedAt);
+    if (reprobe.length) {
+      pushEvent({
+        id: `catalog-reprobe-${Date.now()}`,
+        type: 'lifecycle',
+        message: `カタログへ再出現したため即時再確認: ${reprobe.join(', ')}`,
+        at: checkedAt,
+        result: null,
+      });
+    }
     pushEvent({
       id: `discovery-${Date.now()}`,
       type: 'discovery',
@@ -187,13 +232,45 @@ async function discoverProductsIfDue() {
 }
 
 async function runCheck(entry) {
+  const settings = productSettings(entry);
+  const startedAt = Date.now();
   const result = await checkNikeStock(entry.url, {
-    sizeFilters: config.sizeFilters,
+    sizeFilters: settings.sizeFilters,
     timeoutMs: 20000,
   });
+  const durationMs = Date.now() - startedAt;
   const checkedAt = result.checkedAt || new Date().toISOString();
   const styleColor = result.product?.styleColor || entry.styleColor;
-  const { nextStockKey, shouldNotify } = notificationDecision(entry, result);
+  const decision = notificationDecision(entry, result);
+  const { nextStockKey, previousStockKey, addedSizes, shouldNotify } = decision;
+  recordCheckSample({ at: checkedAt, styleColor, ok: result.ok, durationMs, inStock: result.inStock });
+  const stockTransition = recordStockTransition(entry, result, { now: checkedAt });
+  if (stockTransition) {
+    history.unshift(stockTransition);
+    history.splice(MAX_HISTORY);
+    pushEvent({
+      id: `stock-change-${Date.now()}-${styleColor}`,
+      type: 'stock-change',
+      message: stockTransition.message,
+      at: checkedAt,
+      result: null,
+    });
+  }
+  const lifecycleTransition = updateDelistState(entry, result, {
+    threshold: config.delistFailureThreshold,
+    now: checkedAt,
+  });
+  if (lifecycleTransition) {
+    pushEvent({
+      id: `lifecycle-${Date.now()}-${styleColor}`,
+      type: 'lifecycle',
+      message: lifecycleTransition === 'paused'
+        ? `${styleColor}: 販売終了候補として監視を自動休止しました`
+        : `${styleColor}: 商品を再確認できたため監視を再開しました`,
+      at: checkedAt,
+      result: null,
+    });
+  }
   const relatedAdded = addKnownProducts(result.relatedProducts || [], 'product-page');
 
   if (relatedAdded.length) {
@@ -223,16 +300,22 @@ async function runCheck(entry) {
   });
 
   let notified = false;
-  if (shouldNotify && config.discordWebhook) {
+  const notificationEnabled = settings.notify && Boolean(config.discordWebhook);
+  if (shouldNotify && notificationEnabled) {
     try {
       await sendDiscordNotification({
         webhook: config.discordWebhook,
+        mention: settings.mention,
         title: `${result.product.title} (${styleColor}) が在庫あり`,
-        message: result.matchingSizes.length
-          ? `対象サイズ: ${result.matchingSizes.map((size) => size.label).join(', ')}`
+        message: addedSizes.length
+          ? `新しく在庫になったサイズ: ${addedSizes.join(', ')}`
           : '対象商品が購入できる可能性があります。',
         url: result.product.url,
         sizes: result.matchingSizes,
+        newSizes: addedSizes,
+        previousStockKey,
+        price: result.product.price,
+        checkedAt,
         imageUrl: result.product.imageUrl,
       });
       notified = true;
@@ -258,7 +341,7 @@ async function runCheck(entry) {
     nextStockKey,
     shouldNotify,
     notified,
-    webhookConfigured: Boolean(config.discordWebhook),
+    webhookConfigured: notificationEnabled,
   });
 
   await persist(checkedAt);
@@ -297,6 +380,13 @@ function addKnownProduct(product, source) {
     discoveredAt: now,
     lastSeenAt: null,
     lastStockKey: '',
+    lastObservedStockKey: undefined,
+    missingStreak: 0,
+    pausedAt: null,
+    pausedReason: '',
+    catalogPresent: undefined,
+    lastCatalogSeenAt: null,
+    stockHistory: [],
     lastResult: null,
   };
   state.knownProducts[styleColor] = entry;
@@ -319,7 +409,14 @@ function normalizeKnownProducts(value) {
         discoveredAt: product.discoveredAt || new Date().toISOString(),
         lastSeenAt: product.lastSeenAt || null,
         lastStockKey: product.lastStockKey || '',
+        lastObservedStockKey: product.lastObservedStockKey,
         oosStreak: Number(product.oosStreak) || 0,
+        missingStreak: Number(product.missingStreak) || 0,
+        pausedAt: product.pausedAt || null,
+        pausedReason: product.pausedReason || '',
+        catalogPresent: typeof product.catalogPresent === 'boolean' ? product.catalogPresent : undefined,
+        lastCatalogSeenAt: product.lastCatalogSeenAt || null,
+        stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],
         lastResult: product.lastResult || null,
         lastRuntimeError: product.lastRuntimeError || null,
       };
@@ -334,9 +431,56 @@ function trackedProducts() {
   return Object.values(state.knownProducts).sort((a, b) => a.styleColor.localeCompare(b.styleColor));
 }
 
+function monitorableProducts() {
+  if (config.productConfigError) return [];
+  return trackedProducts().filter((entry) => productSettings(entry).enabled);
+}
+
+function productsDueForCheck(now = Date.now()) {
+  return monitorableProducts()
+    .filter((entry) => singleSweep || millisecondsUntilProductDue(entry, schedulingOptions(now)) <= 0)
+    .sort((a, b) => {
+      const priority = Number(isUpcomingPriority(b, now, config.upcomingWindowMinutes))
+        - Number(isUpcomingPriority(a, now, config.upcomingWindowMinutes));
+      return priority || a.styleColor.localeCompare(b.styleColor);
+    });
+}
+
+function nextScheduledWaitMs(now = Date.now()) {
+  const products = monitorableProducts();
+  if (!products.length) return config.intervalSeconds * 1000;
+  return Math.min(...products.map((entry) => millisecondsUntilProductDue(entry, schedulingOptions(now))));
+}
+
+function schedulingOptions(now) {
+  return {
+    now,
+    normalIntervalSeconds: config.intervalSeconds,
+    upcomingIntervalSeconds: config.upcomingIntervalSeconds,
+    upcomingWindowMinutes: config.upcomingWindowMinutes,
+    pausedRecheckHours: config.pausedRecheckHours,
+  };
+}
+
+function productSettings(entry) {
+  return settingsForProduct(
+    config.productConfig,
+    entry.styleColor,
+    config.sizeFilters,
+    config.discordMention,
+  );
+}
+
 async function persist(updatedAt) {
   state.events = events;
-  const monitorErrors = collectMonitorErrors(trackedProducts(), state.lastDiscoveryError);
+  state.history = history;
+  const monitorErrors = collectMonitorErrors(
+    monitorableProducts().filter((product) => !product.pausedAt),
+    state.lastDiscoveryError,
+  );
+  if (config.productConfigError) {
+    monitorErrors.unshift(`商品別設定: ${config.productConfigError}`);
+  }
   state.lastErrors = monitorErrors;
   state.lastError = monitorErrors[0] || null;
 
@@ -346,6 +490,18 @@ async function persist(updatedAt) {
     source: entry.source,
     discoveredAt: entry.discoveredAt,
     lastSeenAt: entry.lastSeenAt,
+    pausedAt: entry.pausedAt,
+    pausedReason: entry.pausedReason,
+    missingStreak: entry.missingStreak,
+    settings: {
+      sizeFilters: productSettings(entry).sizeFilters,
+      notify: productSettings(entry).notify,
+      enabled: !config.productConfigError && productSettings(entry).enabled,
+    },
+    stockHistory: entry.stockHistory || [],
+    metrics: computeQualityMetrics(
+      state.checkSamples.filter((sample) => sample.styleColor === entry.styleColor),
+    ),
     lastResult: entry.lastResult,
     lastError: entry.lastRuntimeError?.message || (entry.lastResult?.ok === false ? entry.lastResult.statusLabel : null),
   }));
@@ -354,8 +510,9 @@ async function persist(updatedAt) {
     .filter(Boolean)
     .sort((a, b) => Date.parse(b.checkedAt || '') - Date.parse(a.checkedAt || ''))[0] || null;
 
+  const quality = computeQualityMetrics(state.checkSamples);
   const publicStatus = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     updatedAt,
     config: {
       productUrl: config.productUrl,
@@ -368,6 +525,12 @@ async function persist(updatedAt) {
       intervalSeconds: config.intervalSeconds,
       loopMinutes: config.loopMinutes,
       productCheckDelayMs: config.productCheckDelayMs,
+      delistFailureThreshold: config.delistFailureThreshold,
+      pausedRecheckHours: config.pausedRecheckHours,
+      upcomingIntervalSeconds: config.upcomingIntervalSeconds,
+      upcomingWindowMinutes: config.upcomingWindowMinutes,
+      productOverrides: publicProductOverrides(),
+      productConfigError: config.productConfigError,
       discordWebhookSet: Boolean(config.discordWebhook),
     },
     discovery: {
@@ -376,6 +539,14 @@ async function persist(updatedAt) {
       lastError: state.lastDiscoveryError || null,
     },
     products,
+    metrics: {
+      ...quality,
+      activeProducts: products.filter((product) => product.settings.enabled && !product.pausedAt).length,
+      pausedProducts: products.filter((product) => product.pausedAt).length,
+      disabledProducts: products.filter((product) => !product.settings.enabled).length,
+      consecutiveFailedCycles: state.consecutiveFailedCycles,
+    },
+    history,
     lastResult,
     errors: monitorErrors,
     lastError: state.lastError,
@@ -389,6 +560,18 @@ async function persist(updatedAt) {
 function pushEvent(event) {
   events.unshift(event);
   events.splice(MAX_EVENTS);
+}
+
+function recordCheckSample(sample) {
+  state.checkSamples.push(sample);
+  state.checkSamples = normalizeCheckSamples(state.checkSamples);
+}
+
+function normalizeCheckSamples(value) {
+  const cutoff = Date.now() - 25 * 3600 * 1000;
+  return (Array.isArray(value) ? value : [])
+    .filter((sample) => Number.isFinite(Date.parse(sample?.at || '')) && Date.parse(sample.at) >= cutoff)
+    .slice(-MAX_CHECK_SAMPLES);
 }
 
 async function readJson(filePath, fallback) {
@@ -411,6 +594,17 @@ function validateWebhook(value) {
   // 不正な値は通知を無効化する。生の値はログにも出さない(トークン漏洩防止)。
   console.warn('DISCORD_WEBHOOK is not a valid http(s) URL; Discord notifications are disabled.');
   return '';
+}
+
+function publicProductOverrides() {
+  return Object.fromEntries(Object.entries(config.productConfig).map(([styleColor, settings]) => [
+    styleColor,
+    {
+      sizeFilters: settings.sizeFilters,
+      notify: settings.notify,
+      enabled: settings.enabled,
+    },
+  ]));
 }
 
 // webhook URL(トークン)が公開 events / status.json 経由で GitHub Pages に漏れないよう、
@@ -452,25 +646,53 @@ function compactResult(result) {
     statusLabel: result.statusLabel,
     inStock: result.inStock,
     matchingSizes: result.matchingSizes,
+    availabilityState: result.availabilityState,
+    releaseAt: result.releaseAt,
     checkedAt: result.checkedAt,
   };
 }
 
-async function sendDiscordNotification({ webhook, title, message, url, sizes, imageUrl }) {
+async function sendDiscordNotification({
+  webhook,
+  mention,
+  title,
+  message,
+  url,
+  sizes,
+  newSizes,
+  previousStockKey,
+  price,
+  checkedAt,
+  imageUrl,
+}) {
   const fields = [];
+  if (newSizes?.length) {
+    fields.push({ name: '新規サイズ', value: newSizes.join(', '), inline: false });
+  }
   if (sizes?.length) {
     fields.push({
-      name: 'サイズ',
+      name: '現在の対象サイズ',
       value: sizes.map((size) => size.label).join(', '),
       inline: false,
     });
   }
+  fields.push({
+    name: '前回在庫',
+    value: formatPreviousStock(previousStockKey),
+    inline: true,
+  });
+  if (price) fields.push({ name: '価格', value: price, inline: true });
+  fields.push({ name: '確認時刻', value: formatDiscordDate(checkedAt), inline: false });
+
+  const allowedMentions = discordAllowedMentions(mention);
 
   const response = await fetch(webhook, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(15000),
     body: JSON.stringify({
-      content: null,
+      content: mention || null,
+      allowed_mentions: allowedMentions,
       embeds: [
         {
           title,
@@ -486,6 +708,26 @@ async function sendDiscordNotification({ webhook, title, message, url, sizes, im
   });
 
   if (!response.ok) {
+    await response.body?.cancel();
     throw new Error(`Discord通知に失敗しました: ${response.status} ${response.statusText}`);
   }
+}
+
+function formatPreviousStock(value) {
+  if (!value) return '在庫なし';
+  if (value === '__product__') return '商品レベルで在庫あり';
+  return value.split('|').filter(Boolean).join(', ') || '在庫なし';
+}
+
+function formatDiscordDate(value) {
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) ? `<t:${Math.floor(timestamp / 1000)}:F>` : '不明';
+}
+
+function discordAllowedMentions(mention) {
+  const role = String(mention || '').match(/^<@&(\d+)>$/)?.[1];
+  if (role) return { parse: [], roles: [role] };
+  const user = String(mention || '').match(/^<@(\d+)>$/)?.[1];
+  if (user) return { parse: [], users: [user] };
+  return { parse: [] };
 }
