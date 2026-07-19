@@ -44,8 +44,8 @@ export function applyCheckState(
   { nextStockKey, shouldNotify, notified, webhookConfigured },
 ) {
   if (!result.ok) {
-    // 取得失敗は「在庫なし」の確認ではないため、連続 OOS 判定を中断する。
-    entry.oosStreak = 0;
+    // 取得失敗は「在庫なし」でも「在庫あり」でもない。直前までに得た OOS の
+    // 確認回数を凍結し、断続的なボットブロックで再入荷通知の再武装を妨げない。
     return entry.lastStockKey || '';
   }
 
@@ -71,22 +71,95 @@ export function nextCycleDelayMs(intervalSeconds, consecutiveFailedCycles, maxSe
   return Math.min(maxSeconds, baseSeconds * multiplier) * 1000;
 }
 
-export function nextFailedCycleStreak(
-  currentStreak,
-  { cycleFailures, checkedProducts, totalProducts, completedSweep },
+export function nextFailureBackoffUntil(
+  currentValue,
+  {
+    attempted = false,
+    streak = 0,
+    intervalSeconds = 120,
+    now = Date.now(),
+  } = {},
 ) {
-  const current = Math.max(0, Number(currentStreak) || 0);
+  const currentTimestamp = Date.parse(currentValue || '');
+  const current = Number.isFinite(currentTimestamp)
+    ? new Date(currentTimestamp).toISOString()
+    : null;
+  if (!attempted) return current;
+  if (Math.max(0, Number(streak) || 0) === 0) return null;
 
-  // 部分巡回でも1商品以上成功していれば「全商品失敗」の連続性は明確に切れる。
-  if (checkedProducts > cycleFailures) return 0;
+  const nowMs = timestampOrNow(now);
+  return new Date(nowMs + nextCycleDelayMs(intervalSeconds, streak)).toISOString();
+}
 
-  // deadline で途中終了した巡回はフリート全体の成否を判定できないため、
-  // 確認した商品がすべて失敗した場合だけ、既存のストリークを維持して
-  // 次の完全な巡回へ判断を持ち越す。
-  if (!completedSweep || checkedProducts !== totalProducts) return current;
+export function millisecondsUntilFailureBackoff(value, now = Date.now()) {
+  const backoffUntil = Date.parse(value || '');
+  if (!Number.isFinite(backoffUntil)) return 0;
+  return Math.max(0, backoffUntil - timestampOrNow(now));
+}
 
-  const allProductsFailed = totalProducts > 0 && cycleFailures === totalProducts;
-  return allProductsFailed ? current + 1 : 0;
+export function nextFailureWindowState(
+  currentStreak,
+  currentWindow,
+  {
+    attempts = [],
+    activeProducts = [],
+    totalProducts = 0,
+    now = Date.now(),
+    windowMinutes = 10,
+    minimumProducts = 2,
+  } = {},
+) {
+  const streak = Math.max(0, Number(currentStreak) || 0);
+  const normalizedAttempts = (Array.isArray(attempts) ? attempts : [])
+    .filter((attempt) => String(attempt?.styleColor || '').trim())
+    .map((attempt) => ({
+      styleColor: String(attempt.styleColor).toUpperCase(),
+      ok: attempt.ok === true,
+    }));
+
+  const nowMs = timestampOrNow(now);
+  const maxAgeMs = Math.max(1, Number(windowMinutes) || 10) * 60 * 1000;
+  const previousWindow = normalizeFailureWindow(currentWindow);
+  const previousStartedAt = Date.parse(previousWindow?.startedAt || '');
+  const expired = !Number.isFinite(previousStartedAt) || nowMs - previousStartedAt > maxAgeMs;
+
+  if (!normalizedAttempts.length) {
+    return expired
+      ? { streak: 0, window: null }
+      : { streak, window: previousWindow };
+  }
+
+  // 1商品でも成功すればフリート全体の障害ではない。
+  if (normalizedAttempts.some((attempt) => attempt.ok)) {
+    return { streak: 0, window: null };
+  }
+
+  const activeProductSet = new Set(
+    (Array.isArray(activeProducts) ? activeProducts : [])
+      .map((item) => String(item || '').trim().toUpperCase())
+      .filter(Boolean),
+  );
+  const failedProducts = new Set(
+    (expired ? [] : previousWindow.products)
+      .filter((styleColor) => !activeProductSet.size || activeProductSet.has(styleColor)),
+  );
+  for (const attempt of normalizedAttempts) failedProducts.add(attempt.styleColor);
+
+  const activeCount = activeProductSet.size || Math.max(0, Number(totalProducts) || 0);
+  const requiredProducts = Math.min(
+    activeCount,
+    Math.max(1, Number(minimumProducts) || 2),
+  );
+  const confirmedFleetFailure = requiredProducts > 0 && failedProducts.size >= requiredProducts;
+  const activeStreak = expired ? 0 : streak;
+
+  return {
+    streak: confirmedFleetFailure ? activeStreak + 1 : activeStreak,
+    window: {
+      startedAt: expired ? new Date(nowMs).toISOString() : previousWindow.startedAt,
+      products: [...failedProducts].sort(),
+    },
+  };
 }
 
 export function shouldStopDuringSweep({ singleSweep, deadline, now = Date.now() }) {
@@ -106,4 +179,26 @@ export function collectMonitorErrors(products, discoveryError = '') {
     }
   }
   return errors;
+}
+
+function normalizeFailureWindow(value) {
+  const startedAt = Date.parse(value?.startedAt || '');
+  if (!Number.isFinite(startedAt)) return null;
+  return {
+    startedAt: new Date(startedAt).toISOString(),
+    products: [...new Set(
+      (Array.isArray(value?.products) ? value.products : [])
+        .map((item) => String(item || '').trim().toUpperCase())
+        .filter(Boolean),
+    )].sort(),
+  };
+}
+
+function timestampOrNow(value) {
+  if (value !== null && value !== undefined && value !== '') {
+    const numeric = Number(value);
+    const parsed = Number.isFinite(numeric) ? numeric : Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Date.now();
 }

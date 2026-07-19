@@ -48,13 +48,15 @@ function render(state) {
       ? [state.lastError]
       : [];
   const stale = isStatusStale(state, config, products);
+  const configuredLoopMinutes = Number(config.loopMinutes);
+  const loopMinutesValue = Number.isFinite(configuredLoopMinutes) ? configuredLoopMinutes : 25;
 
   const overrideCount = Object.keys(config.productOverrides || {}).length;
   sizeFiltersDisplay.textContent = overrideCount
     ? `${config.sizeFilters || '全サイズ'} / 商品別${overrideCount}件`
     : config.sizeFilters || '全サイズ';
   intervalDisplay.textContent = `${Number(config.intervalSeconds || 120)}秒`;
-  loopDisplay.textContent = `${Number(config.loopMinutes || 25)}分`;
+  loopDisplay.textContent = `${loopMinutesValue}分`;
   discordDisplay.textContent = config.discordWebhookSet ? '通知設定済み' : '未設定';
 
   const discoveryAt = state.discovery?.lastCheckedAt;
@@ -78,7 +80,12 @@ function render(state) {
     : state.updatedAt
       ? formatDate(state.updatedAt)
       : '-';
-  nextCheck.textContent = `巡回完了後 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`;
+  const monitorableCount = products.filter((item) => item.settings?.enabled !== false).length;
+  nextCheck.textContent = state.nextCheckAt
+    ? formatDate(state.nextCheckAt)
+    : monitorableCount > 0
+      ? `商品ごと 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`
+      : '監視対象なし';
 
   renderProducts(products);
   renderQuality(state.metrics || {});
@@ -153,7 +160,9 @@ function renderProducts(products) {
     const status = disabled
       ? '設定で無効'
       : paused
-        ? '販売終了候補・自動休止'
+        ? item.pausedReason === 'unreachable'
+          ? '長時間確認不能・自動休止'
+          : '販売終了候補・自動休止'
         : item.lastError || result?.statusLabel || '初回確認待ち';
     const statusClass = result?.inStock && !paused && !disabled
       ? 'available'
@@ -241,7 +250,8 @@ function isStatusStale(state, config, products) {
   const lastCheckedAt = state.updatedAt || latestDate(products.map((item) => item.lastResult?.checkedAt));
   if (!lastCheckedAt) return false;
   const intervalSeconds = Number(config.intervalSeconds || 120);
-  const loopMinutes = Number(config.loopMinutes || 25);
+  const configuredLoopMinutes = Number(config.loopMinutes);
+  const loopMinutes = Number.isFinite(configuredLoopMinutes) ? configuredLoopMinutes : 25;
   const staleAfterSeconds = Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
   return Date.now() - new Date(lastCheckedAt).getTime() > staleAfterSeconds * 1000;
 }

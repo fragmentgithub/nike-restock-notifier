@@ -3,6 +3,9 @@ name: Discord Test
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   discord-test:
     runs-on: ubuntu-latest

@@ -1,5 +1,11 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  discordAllowedMentions,
+  normalizeDiscordWebhook,
+  postDiscordWebhook,
+  scrubDiscordWebhook,
+} from '../src/discord.js';
 import { checkNikeStock, parseNikeProductUrl } from '../src/nike.js';
 import {
   DEFAULT_DISCOVERY_URL,
@@ -9,23 +15,28 @@ import {
 import {
   applyCheckState,
   collectMonitorErrors,
-  nextCycleDelayMs,
-  nextFailedCycleStreak,
+  millisecondsUntilFailureBackoff,
+  nextFailureBackoffUntil,
+  nextFailureWindowState,
   notificationDecision,
   shouldStopDuringSweep,
 } from '../src/monitor-state.js';
 import {
   applyRuntimeFailure,
   computeQualityMetrics,
+  formatStockLabels,
+  hasRecentSuccessForOtherProduct,
   isUpcomingPriority,
   millisecondsUntilProductDue,
   normalizeDiscordMention,
   parseProductConfigSafely,
   recordStockTransition,
   settingsForProduct,
+  shouldChainNextRun,
   shouldCheckProductNow,
   updateDelistState,
   updateCatalogPresence,
+  updateUpcomingState,
 } from '../src/monitor-policy.js';
 
 const STATE_DIR = '.monitor-state';
@@ -61,8 +72,8 @@ const config = {
   pausedRecheckHours: clampNumber(process.env.PAUSED_RECHECK_HOURS, 24, 1, 168),
   upcomingIntervalSeconds: clampNumber(process.env.UPCOMING_INTERVAL_SECONDS, 30, 15, 600),
   upcomingWindowMinutes: clampNumber(process.env.UPCOMING_WINDOW_MINUTES, 180, 15, 1440),
-  discordMention: normalizeDiscordMention(process.env.DISCORD_MENTION),
-  discordWebhook: validateWebhook(process.env.DISCORD_WEBHOOK || ''),
+  discordMention: configuredDiscordMention(process.env.DISCORD_MENTION),
+  discordWebhook: configuredDiscordWebhook(process.env.DISCORD_WEBHOOK || ''),
 };
 
 await mkdir(STATE_DIR, { recursive: true });
@@ -94,22 +105,23 @@ for (;;) {
   cycles += 1;
   const activeFleet = monitorableProducts().filter((product) => !product.pausedAt);
   const products = productsDueForCheck();
-  let cycleFailures = 0;
-  let checkedProducts = 0;
-  let completedSweep = true;
+  const cycleAttempts = [];
 
   for (let index = 0; index < products.length; index += 1) {
     const countedAsActive = !products[index].pausedAt;
     const attemptStartedAt = Date.now();
     checks += 1;
-    if (countedAsActive) checkedProducts += 1;
     try {
       const outcome = await runCheck(products[index]);
       if (outcome.notified) notifications += 1;
-      if (countedAsActive && !outcome.ok) cycleFailures += 1;
+      if (countedAsActive) {
+        cycleAttempts.push({ styleColor: products[index].styleColor, ok: outcome.ok });
+      }
     } catch (error) {
       const checkedAt = new Date().toISOString();
-      if (countedAsActive) cycleFailures += 1;
+      if (countedAsActive) {
+        cycleAttempts.push({ styleColor: products[index].styleColor, ok: false });
+      }
       const sample = applyRuntimeFailure(products[index], error, {
         checkedAt,
         durationMs: Date.now() - attemptStartedAt,
@@ -128,7 +140,6 @@ for (;;) {
     // スイープ途中でも deadline を超えたら打ち切る。商品数が増えても最終スイープが
     // timeout-minutes を突き抜けてジョブが timeout/cancel されるのを防ぐ。
     if (shouldStopDuringSweep({ singleSweep, deadline })) {
-      completedSweep = index === products.length - 1;
       break;
     }
 
@@ -137,25 +148,51 @@ for (;;) {
     }
   }
 
-  // バックオフは「全商品が失敗したサイクル」(＝ネットワーク障害/Nike側ブロック等)に限定する。
-  // 1商品だけの恒久失敗(例: discovery が拾った色の delist=404)でフリート全体の巡回間隔が
-  // 延び続けないようにする。
-  state.consecutiveFailedCycles = nextFailedCycleStreak(state.consecutiveFailedCycles, {
-    cycleFailures,
-    checkedProducts,
-    totalProducts: activeFleet.length,
-    completedSweep: completedSweep && checkedProducts === activeFleet.length,
+  // due方式では1サイクルが部分巡回になるため、直近の時間窓で複数商品がすべて失敗した
+  // 場合をフリート障害とみなす。単一商品の恒久失敗では全体を減速しない。
+  const failureState = nextFailureWindowState(
+    state.consecutiveFailedCycles,
+    state.failureWindow,
+    {
+      attempts: cycleAttempts,
+      activeProducts: activeFleet.map((product) => product.styleColor),
+      totalProducts: activeFleet.length,
+      windowMinutes: fleetFailureWindowMinutes(activeFleet.length),
+    },
+  );
+  state.consecutiveFailedCycles = failureState.streak;
+  state.failureWindow = failureState.window;
+  const cycleCompletedAt = Date.now();
+  state.failureBackoffUntil = nextFailureBackoffUntil(state.failureBackoffUntil, {
+    attempted: cycleAttempts.length > 0,
+    streak: state.consecutiveFailedCycles,
+    intervalSeconds: config.intervalSeconds,
+    now: cycleCompletedAt,
   });
-  const scheduledWaitMs = nextScheduledWaitMs();
-  const failureWaitMs = state.consecutiveFailedCycles > 0
-    ? nextCycleDelayMs(config.intervalSeconds, state.consecutiveFailedCycles)
-    : 0;
+  const scheduledWaitMs = nextScheduledWaitMs(cycleCompletedAt);
+  const failureWaitMs = millisecondsUntilFailureBackoff(
+    state.failureBackoffUntil,
+    cycleCompletedAt,
+  );
   const waitMs = Math.max(1000, scheduledWaitMs, failureWaitMs);
-  await persist(new Date().toISOString());
+  await persist(new Date(cycleCompletedAt).toISOString());
   if (singleSweep || Date.now() + waitMs > deadline) break;
   await sleep(waitMs);
   if (!config.productConfigError) await discoverProductsIfDue();
 }
+
+const nextEffectiveWait = nextEffectiveWaitMs();
+const nextDueMinutes = Number.isFinite(nextEffectiveWait)
+  ? Math.max(0, Math.ceil(nextEffectiveWait / 60000))
+  : null;
+const shouldChain = shouldChainNextRun({
+  singleSweep,
+  monitorableProductCount: monitorableProducts().length,
+  nextDueMinutes,
+  loopMinutes: config.loopMinutes,
+});
+await writeActionOutput('next_due_minutes', nextDueMinutes ?? '');
+await writeActionOutput('should_chain', shouldChain);
 
 console.log(
   JSON.stringify(
@@ -168,6 +205,8 @@ console.log(
       loopMinutes: config.loopMinutes,
       lastDiscoveryAt: state.lastDiscoveryAt || null,
       consecutiveFailedCycles: state.consecutiveFailedCycles,
+      nextDueMinutes,
+      shouldChain,
     },
     null,
     2,
@@ -242,6 +281,7 @@ async function runCheck(entry) {
   const durationMs = Date.now() - startedAt;
   const checkedAt = result.checkedAt || new Date().toISOString();
   const styleColor = result.product?.styleColor || entry.styleColor;
+  updateUpcomingState(entry, result, { now: Date.parse(checkedAt) });
   const decision = notificationDecision(entry, result);
   const { nextStockKey, previousStockKey, addedSizes, shouldNotify } = decision;
   recordCheckSample({ at: checkedAt, styleColor, ok: result.ok, durationMs, inStock: result.inStock });
@@ -259,6 +299,13 @@ async function runCheck(entry) {
   }
   const lifecycleTransition = updateDelistState(entry, result, {
     threshold: config.delistFailureThreshold,
+    unreachableThreshold: config.delistFailureThreshold * 4,
+    allowUnreachablePause: hasRecentSuccessForOtherProduct(state.checkSamples, styleColor, {
+      now: Date.parse(checkedAt),
+      windowMinutes: fleetFailureWindowMinutes(
+        monitorableProducts().filter((product) => !product.pausedAt).length,
+      ),
+    }),
     now: checkedAt,
   });
   if (lifecycleTransition) {
@@ -266,7 +313,9 @@ async function runCheck(entry) {
       id: `lifecycle-${Date.now()}-${styleColor}`,
       type: 'lifecycle',
       message: lifecycleTransition === 'paused'
-        ? `${styleColor}: 販売終了候補として監視を自動休止しました`
+        ? entry.pausedReason === 'unreachable'
+          ? `${styleColor}: 長時間確認できないため監視を自動休止しました`
+          : `${styleColor}: 販売終了候補として監視を自動休止しました`
         : `${styleColor}: 商品を再確認できたため監視を再開しました`,
       at: checkedAt,
       result: null,
@@ -309,7 +358,7 @@ async function runCheck(entry) {
         mention: settings.mention,
         title: `${result.product.title} (${styleColor}) が在庫あり`,
         message: addedSizes.length
-          ? `新しく在庫になったサイズ: ${addedSizes.join(', ')}`
+          ? `新しく在庫になったサイズ: ${formatStockLabels(addedSizes)}`
           : '対象商品が購入できる可能性があります。',
         url: result.product.url,
         sizes: result.matchingSizes,
@@ -382,11 +431,15 @@ function addKnownProduct(product, source) {
     lastSeenAt: null,
     lastStockKey: '',
     lastObservedStockKey: undefined,
+    observedOosStreak: 0,
     missingStreak: 0,
+    unresolvedStreak: 0,
     pausedAt: null,
     pausedReason: '',
     catalogPresent: undefined,
     lastCatalogSeenAt: null,
+    catalogReprobePending: false,
+    upcomingReleaseAt: null,
     stockHistory: [],
     lastResult: null,
   };
@@ -412,11 +465,15 @@ function normalizeKnownProducts(value) {
         lastStockKey: product.lastStockKey || '',
         lastObservedStockKey: product.lastObservedStockKey,
         oosStreak: Number(product.oosStreak) || 0,
+        observedOosStreak: Number(product.observedOosStreak) || 0,
         missingStreak: Number(product.missingStreak) || 0,
+        unresolvedStreak: Number(product.unresolvedStreak) || 0,
         pausedAt: product.pausedAt || null,
         pausedReason: product.pausedReason || '',
         catalogPresent: typeof product.catalogPresent === 'boolean' ? product.catalogPresent : undefined,
         lastCatalogSeenAt: product.lastCatalogSeenAt || null,
+        catalogReprobePending: product.catalogReprobePending === true,
+        upcomingReleaseAt: product.upcomingReleaseAt || null,
         stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],
         lastResult: product.lastResult || null,
         lastRuntimeError: product.lastRuntimeError || null,
@@ -438,6 +495,9 @@ function monitorableProducts() {
 }
 
 function productsDueForCheck(now = Date.now()) {
+  if (!singleSweep && millisecondsUntilFailureBackoff(state.failureBackoffUntil, now) > 0) {
+    return [];
+  }
   return monitorableProducts()
     .filter((entry) => shouldCheckProductNow(entry, {
       singleSweep,
@@ -452,8 +512,15 @@ function productsDueForCheck(now = Date.now()) {
 
 function nextScheduledWaitMs(now = Date.now()) {
   const products = monitorableProducts();
-  if (!products.length) return config.intervalSeconds * 1000;
+  if (!products.length) return Number.POSITIVE_INFINITY;
   return Math.min(...products.map((entry) => millisecondsUntilProductDue(entry, schedulingOptions(now))));
+}
+
+function nextEffectiveWaitMs(now = Date.now()) {
+  return Math.max(
+    nextScheduledWaitMs(now),
+    millisecondsUntilFailureBackoff(state.failureBackoffUntil, now),
+  );
 }
 
 function schedulingOptions(now) {
@@ -464,6 +531,14 @@ function schedulingOptions(now) {
     upcomingWindowMinutes: config.upcomingWindowMinutes,
     pausedRecheckHours: config.pausedRecheckHours,
   };
+}
+
+function fleetFailureWindowMinutes(activeProductCount) {
+  const fullCadenceMs =
+    config.intervalSeconds * 1000 +
+    Math.max(0, Number(activeProductCount) || 0) * config.productCheckDelayMs;
+  // 最大10分のバックオフ中にも同じ障害窓を維持できる余裕を持たせる。
+  return Math.max(15, Math.ceil(fullCadenceMs / 60000));
 }
 
 function productSettings(entry) {
@@ -488,36 +563,47 @@ async function persist(updatedAt) {
   state.lastErrors = monitorErrors;
   state.lastError = monitorErrors[0] || null;
 
-  const products = trackedProducts().map((entry) => ({
-    styleColor: entry.styleColor,
-    url: entry.url,
-    source: entry.source,
-    discoveredAt: entry.discoveredAt,
-    lastSeenAt: entry.lastSeenAt,
-    pausedAt: entry.pausedAt,
-    pausedReason: entry.pausedReason,
-    missingStreak: entry.missingStreak,
-    settings: {
-      sizeFilters: productSettings(entry).sizeFilters,
-      notify: productSettings(entry).notify,
-      enabled: !config.productConfigError && productSettings(entry).enabled,
-    },
-    stockHistory: entry.stockHistory || [],
-    metrics: computeQualityMetrics(
-      state.checkSamples.filter((sample) => sample.styleColor === entry.styleColor),
-    ),
-    lastResult: entry.lastResult,
-    lastError: entry.lastRuntimeError?.message || (entry.lastResult?.ok === false ? entry.lastResult.statusLabel : null),
-  }));
+  const checkSamplesByProduct = groupCheckSamplesByProduct(state.checkSamples);
+  const products = trackedProducts().map((entry) => {
+    const settings = productSettings(entry);
+    return {
+      styleColor: entry.styleColor,
+      url: entry.url,
+      source: entry.source,
+      discoveredAt: entry.discoveredAt,
+      lastSeenAt: entry.lastSeenAt,
+      pausedAt: entry.pausedAt,
+      pausedReason: entry.pausedReason,
+      missingStreak: entry.missingStreak,
+      unresolvedStreak: entry.unresolvedStreak,
+      catalogReprobePending: entry.catalogReprobePending === true,
+      settings: {
+        sizeFilters: settings.sizeFilters,
+        notify: settings.notify,
+        enabled: !config.productConfigError && settings.enabled,
+      },
+      stockHistory: entry.stockHistory || [],
+      metrics: computeQualityMetrics(checkSamplesByProduct.get(entry.styleColor) || []),
+      lastResult: entry.lastResult,
+      lastError:
+        entry.lastRuntimeError?.message ||
+        (entry.lastResult?.ok === false ? entry.lastResult.statusLabel : null),
+    };
+  });
   const lastResult = products
     .map((product) => product.lastResult)
     .filter(Boolean)
     .sort((a, b) => Date.parse(b.checkedAt || '') - Date.parse(a.checkedAt || ''))[0] || null;
 
   const quality = computeQualityMetrics(state.checkSamples);
+  const statusUpdatedAt = Date.parse(updatedAt);
+  const nextWaitMs = nextEffectiveWaitMs(Number.isFinite(statusUpdatedAt) ? statusUpdatedAt : Date.now());
   const publicStatus = {
     schemaVersion: 3,
     updatedAt,
+    nextCheckAt: Number.isFinite(nextWaitMs)
+      ? new Date((Number.isFinite(statusUpdatedAt) ? statusUpdatedAt : Date.now()) + nextWaitMs).toISOString()
+      : null,
     config: {
       productUrl: config.productUrl,
       productUrls: products.map((product) => product.url),
@@ -573,9 +659,24 @@ function recordCheckSample(sample) {
 
 function normalizeCheckSamples(value) {
   const cutoff = Date.now() - 25 * 3600 * 1000;
-  return (Array.isArray(value) ? value : [])
-    .filter((sample) => Number.isFinite(Date.parse(sample?.at || '')) && Date.parse(sample.at) >= cutoff)
-    .slice(-MAX_CHECK_SAMPLES);
+  const recent = [];
+  for (const sample of Array.isArray(value) ? value : []) {
+    const timestamp = Date.parse(sample?.at || '');
+    if (Number.isFinite(timestamp) && timestamp >= cutoff) recent.push(sample);
+  }
+  return recent.slice(-MAX_CHECK_SAMPLES);
+}
+
+function groupCheckSamplesByProduct(samples) {
+  const grouped = new Map();
+  for (const sample of samples || []) {
+    const styleColor = String(sample?.styleColor || '').toUpperCase();
+    if (!styleColor) continue;
+    const productSamples = grouped.get(styleColor) || [];
+    productSamples.push(sample);
+    grouped.set(styleColor, productSamples);
+  }
+  return grouped;
 }
 
 async function readJson(filePath, fallback) {
@@ -586,18 +687,30 @@ async function readJson(filePath, fallback) {
   }
 }
 
-function validateWebhook(value) {
+async function writeActionOutput(name, value) {
+  const outputPath = String(process.env.GITHUB_OUTPUT || '').trim();
+  if (!outputPath) return;
+  await appendFile(outputPath, `${name}=${value}\n`, 'utf8');
+}
+
+function configuredDiscordWebhook(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
-  try {
-    const url = new URL(raw);
-    if (url.protocol === 'http:' || url.protocol === 'https:') return raw;
-  } catch {
-    // 下でまとめて無効化する。
-  }
+  const normalized = normalizeDiscordWebhook(raw);
+  if (normalized) return normalized;
   // 不正な値は通知を無効化する。生の値はログにも出さない(トークン漏洩防止)。
-  console.warn('DISCORD_WEBHOOK is not a valid http(s) URL; Discord notifications are disabled.');
+  console.warn('DISCORD_WEBHOOK is not a valid Discord webhook; Discord notifications are disabled.');
   return '';
+}
+
+function configuredDiscordMention(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const normalized = normalizeDiscordMention(raw);
+  if (!normalized) {
+    console.warn('DISCORD_MENTION is invalid; global mentions are disabled.');
+  }
+  return normalized;
 }
 
 function publicProductOverrides() {
@@ -614,9 +727,7 @@ function publicProductOverrides() {
 // webhook URL(トークン)が公開 events / status.json 経由で GitHub Pages に漏れないよう、
 // 通知失敗メッセージから webhook 文字列を伏せる。
 function scrubWebhook(text) {
-  let out = String(text || '');
-  if (config.discordWebhook) out = out.split(config.discordWebhook).join('[webhook]');
-  return out.replace(/https?:\/\/\S*discord(?:app)?\.com\/api\/webhooks\/\S+/gi, '[webhook]');
+  return scrubDiscordWebhook(text, config.discordWebhook);
 }
 
 function clampNumber(value, fallback, min, max) {
@@ -671,7 +782,7 @@ async function sendDiscordNotification({
 }) {
   const fields = [];
   if (newSizes?.length) {
-    fields.push({ name: '新規サイズ', value: newSizes.join(', '), inline: false });
+    fields.push({ name: '新規サイズ', value: formatStockLabels(newSizes), inline: false });
   }
   if (sizes?.length) {
     fields.push({
@@ -690,31 +801,21 @@ async function sendDiscordNotification({
 
   const allowedMentions = discordAllowedMentions(mention);
 
-  const response = await fetch(webhook, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    signal: AbortSignal.timeout(15000),
-    body: JSON.stringify({
-      content: mention || null,
-      allowed_mentions: allowedMentions,
-      embeds: [
-        {
-          title,
-          description: message,
-          url,
-          color: 0x2f7d4a,
-          fields,
-          image: imageUrl ? { url: imageUrl } : undefined,
-          timestamp: new Date().toISOString(),
-        },
-      ],
-    }),
+  await postDiscordWebhook(webhook, {
+    content: mention || null,
+    allowed_mentions: allowedMentions,
+    embeds: [
+      {
+        title,
+        description: message,
+        url,
+        color: 0x2f7d4a,
+        fields,
+        image: imageUrl ? { url: imageUrl } : undefined,
+        timestamp: new Date().toISOString(),
+      },
+    ],
   });
-
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`Discord通知に失敗しました: ${response.status} ${response.statusText}`);
-  }
 }
 
 function formatPreviousStock(value) {
@@ -726,12 +827,4 @@ function formatPreviousStock(value) {
 function formatDiscordDate(value) {
   const timestamp = Date.parse(value || '');
   return Number.isFinite(timestamp) ? `<t:${Math.floor(timestamp / 1000)}:F>` : '不明';
-}
-
-function discordAllowedMentions(mention) {
-  const role = String(mention || '').match(/^<@&(\d+)>$/)?.[1];
-  if (role) return { parse: [], roles: [role] };
-  const user = String(mention || '').match(/^<@(\d+)>$/)?.[1];
-  if (user) return { parse: [], users: [user] };
-  return { parse: [] };
 }

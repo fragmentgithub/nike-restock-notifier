@@ -1,4 +1,7 @@
-import { stockKey } from './monitor-state.js';
+import { OOS_CLEAR_THRESHOLD, stockKey } from './monitor-state.js';
+import { normalizeDiscordMention } from './discord.js';
+
+export { normalizeDiscordMention } from './discord.js';
 
 export function parseProductConfig(value) {
   if (!String(value || '').trim()) return {};
@@ -23,8 +26,13 @@ export function parseProductConfig(value) {
     const normalizedSettings = {
       notify: settings.notify !== false,
       enabled: settings.enabled !== false,
-      mention: normalizeDiscordMention(settings.mention),
     };
+    if (Object.hasOwn(settings, 'mention')) {
+      normalizedSettings.mention = normalizeDiscordMention(settings.mention);
+      if (String(settings.mention || '').trim() && !normalizedSettings.mention) {
+        console.warn(`PRODUCT_CONFIG_JSON ${styleColor}.mention is invalid; mention disabled for this product.`);
+      }
+    }
     if (Object.hasOwn(settings, 'sizes') || Object.hasOwn(settings, 'sizeFilters')) {
       normalizedSettings.sizeFilters = normalizeSizeFilters(settings.sizes ?? settings.sizeFilters);
     }
@@ -49,14 +57,27 @@ export function settingsForProduct(productConfig, styleColor, globalSizeFilters 
       : String(globalSizeFilters || ''),
     notify: settings.notify !== false,
     enabled: settings.enabled !== false,
-    mention: settings.mention || normalizeDiscordMention(globalMention),
+    mention: Object.hasOwn(settings, 'mention')
+      ? settings.mention
+      : normalizeDiscordMention(globalMention),
   };
 }
 
-export function updateDelistState(entry, result, { threshold = 12, now = new Date().toISOString() } = {}) {
+export function updateDelistState(
+  entry,
+  result,
+  {
+    threshold = 12,
+    unreachableThreshold = Math.max(12, Number(threshold) * 4),
+    allowUnreachablePause = true,
+    now = new Date().toISOString(),
+  } = {},
+) {
   if (result?.ok) {
     entry.missingStreak = 0;
-    if (entry.pausedReason === 'delisted') {
+    entry.unresolvedStreak = 0;
+    entry.catalogReprobePending = false;
+    if (entry.pausedReason === 'delisted' || entry.pausedReason === 'unreachable') {
       entry.pausedAt = null;
       entry.pausedReason = '';
       return 'resumed';
@@ -66,9 +87,20 @@ export function updateDelistState(entry, result, { threshold = 12, now = new Dat
 
   if (result?.notFound !== true) {
     if (!entry.pausedAt) entry.missingStreak = 0;
+    entry.unresolvedStreak = (Number(entry.unresolvedStreak) || 0) + 1;
+    if (
+      allowUnreachablePause &&
+      !entry.pausedAt &&
+      entry.unresolvedStreak >= Math.max(1, Number(unreachableThreshold) || 48)
+    ) {
+      entry.pausedAt = now;
+      entry.pausedReason = 'unreachable';
+      return 'paused';
+    }
     return null;
   }
 
+  if (!entry.pausedAt) entry.unresolvedStreak = 0;
   entry.missingStreak = (Number(entry.missingStreak) || 0) + 1;
   if (!entry.pausedAt && entry.missingStreak >= Math.max(1, Number(threshold) || 12)) {
     entry.pausedAt = now;
@@ -110,21 +142,49 @@ export function updateCatalogPresence(entries, discoveredProducts, checkedAt = n
       // 再出現した場合だけ、休止状態のまま即時PDP再確認を予約する。
       if (entry.catalogPresent === false && entry.pausedReason === 'delisted') {
         entry.lastSeenAt = null;
+        entry.catalogReprobePending = true;
         reprobe.push(entry.styleColor);
       }
       entry.catalogPresent = true;
       entry.lastCatalogSeenAt = checkedAt;
     } else {
       entry.catalogPresent = false;
+      entry.catalogReprobePending = false;
     }
   }
   return reprobe;
 }
 
-export function recordStockTransition(entry, result, { now = new Date().toISOString(), maxItems = 60 } = {}) {
+export function recordStockTransition(
+  entry,
+  result,
+  {
+    now = new Date().toISOString(),
+    maxItems = 60,
+    oosThreshold = OOS_CLEAR_THRESHOLD,
+  } = {},
+) {
   if (!result?.ok) return null;
   const nextKey = stockKey(result.availableSizes || []) || (result.inStock ? '__product__' : '');
   const previousKey = entry.lastObservedStockKey;
+  const safeOosThreshold = Math.max(1, Number(oosThreshold) || OOS_CLEAR_THRESHOLD);
+
+  if (nextKey) {
+    entry.observedOosStreak = 0;
+  } else {
+    entry.observedOosStreak = (Number(entry.observedOosStreak) || 0) + 1;
+  }
+
+  // 通知状態と同じく、単発の「在庫なし」はパーサ経路のフリッカとして保留する。
+  // applyCheckState より先に呼ばれるため、今回分を加えた値で閾値を判定する。
+  if (
+    previousKey &&
+    !nextKey &&
+    entry.observedOosStreak < safeOosThreshold
+  ) {
+    return null;
+  }
+
   entry.lastObservedStockKey = nextKey;
   if (previousKey === undefined || previousKey === nextKey) return null;
 
@@ -148,6 +208,27 @@ export function recordStockTransition(entry, result, { now = new Date().toISOStr
   return transition;
 }
 
+export function hasRecentSuccessForOtherProduct(
+  samples,
+  styleColor,
+  { now = Date.now(), windowMinutes = 15 } = {},
+) {
+  const target = String(styleColor || '').trim().toUpperCase();
+  const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.parse(now);
+  if (!target || !Number.isFinite(nowMs)) return false;
+
+  const safeWindowMinutes = Math.max(1, Number(windowMinutes) || 15);
+  const cutoff = nowMs - safeWindowMinutes * 60_000;
+
+  return (Array.isArray(samples) ? samples : []).some((sample) => {
+    if (sample?.ok !== true) return false;
+    const sampleStyleColor = String(sample?.styleColor || '').trim().toUpperCase();
+    if (!sampleStyleColor || sampleStyleColor === target) return false;
+    const sampleAt = Date.parse(sample?.at || '');
+    return Number.isFinite(sampleAt) && sampleAt >= cutoff && sampleAt <= nowMs;
+  });
+}
+
 export function millisecondsUntilProductDue(
   entry,
   {
@@ -161,8 +242,10 @@ export function millisecondsUntilProductDue(
   const lastChecked = Date.parse(entry.lastSeenAt || '');
   if (!Number.isFinite(lastChecked)) return 0;
 
-  const intervalMs = entry.pausedAt
-    ? Math.max(1, Number(pausedRecheckHours) || 24) * 3600 * 1000
+  const intervalMs = entry.catalogReprobePending
+    ? Math.max(30, Number(normalIntervalSeconds) || 120) * 1000
+    : entry.pausedAt
+      ? Math.max(1, Number(pausedRecheckHours) || 24) * 3600 * 1000
     : isUpcomingPriority(entry, now, upcomingWindowMinutes)
       ? Math.max(15, Number(upcomingIntervalSeconds) || 30) * 1000
       : Math.max(30, Number(normalIntervalSeconds) || 120) * 1000;
@@ -174,10 +257,50 @@ export function shouldCheckProductNow(entry, { singleSweep = false, ...scheduleO
   return millisecondsUntilProductDue(entry, scheduleOptions) <= 0;
 }
 
+export function shouldChainNextRun({
+  singleSweep = false,
+  monitorableProductCount = 0,
+  nextDueMinutes,
+  loopMinutes = 25,
+  cronIntervalMinutes = 30,
+} = {}) {
+  const productCount = Math.max(0, Number(monitorableProductCount) || 0);
+  const dueMinutes = nextDueMinutes === null || nextDueMinutes === undefined || nextDueMinutes === ''
+    ? Number.NaN
+    : Number(nextDueMinutes);
+  const runWindowMinutes = Math.max(0, Number(loopMinutes) || 0);
+  const cronWindowMinutes = Math.max(1, Number(cronIntervalMinutes) || 30);
+  const chainWindowMinutes = Math.min(runWindowMinutes, cronWindowMinutes);
+
+  return !singleSweep &&
+    productCount > 0 &&
+    Number.isFinite(dueMinutes) &&
+    dueMinutes >= 0 &&
+    dueMinutes <= chainWindowMinutes;
+}
+
+export function updateUpcomingState(entry, result, { now = Date.now() } = {}) {
+  const observedReleaseAt = Date.parse(result?.releaseAt || '');
+  if (result?.availabilityState === 'coming-soon' && Number.isFinite(observedReleaseAt)) {
+    entry.upcomingReleaseAt = new Date(observedReleaseAt).toISOString();
+  } else if (!entry.upcomingReleaseAt && entry?.lastResult?.availabilityState === 'coming-soon') {
+    const previousReleaseAt = Date.parse(entry.lastResult.releaseAt || '');
+    if (Number.isFinite(previousReleaseAt)) {
+      entry.upcomingReleaseAt = new Date(previousReleaseAt).toISOString();
+    }
+  }
+
+  const rememberedReleaseAt = Date.parse(entry?.upcomingReleaseAt || '');
+  if (Number.isFinite(rememberedReleaseAt) && now > rememberedReleaseAt + 60 * 60 * 1000) {
+    entry.upcomingReleaseAt = null;
+  }
+  return entry.upcomingReleaseAt || null;
+}
+
 export function isUpcomingPriority(entry, now = Date.now(), upcomingWindowMinutes = 180) {
-  if (entry?.lastResult?.availabilityState !== 'coming-soon') return false;
-  const releaseAt = Date.parse(entry.lastResult.releaseAt || '');
-  if (!Number.isFinite(releaseAt)) return true;
+  const currentlyComingSoon = entry?.lastResult?.availabilityState === 'coming-soon';
+  const releaseAt = Date.parse(entry?.lastResult?.releaseAt || entry?.upcomingReleaseAt || '');
+  if (!Number.isFinite(releaseAt)) return currentlyComingSoon;
   const windowMs = Math.max(1, Number(upcomingWindowMinutes) || 180) * 60 * 1000;
   return releaseAt >= now - 60 * 60 * 1000 && releaseAt <= now + windowMs;
 }
@@ -203,11 +326,6 @@ export function computeQualityMetrics(samples, { now = Date.now(), windowHours =
   };
 }
 
-export function normalizeDiscordMention(value) {
-  const raw = String(value || '').trim();
-  return /^(?:<@&\d+>|<@\d+>)$/.test(raw) ? raw : '';
-}
-
 function normalizeSizeFilters(value) {
   if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean).join(',');
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean).join(',');
@@ -228,6 +346,6 @@ function stockTransitionMessage(styleColor, added, removed, current) {
   return `${styleColor}: 全サイズ在庫なし`;
 }
 
-function formatStockLabels(values) {
+export function formatStockLabels(values) {
   return values.map((value) => value === '__product__' ? '商品' : value).join(', ');
 }

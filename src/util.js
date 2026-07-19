@@ -2,19 +2,28 @@
 // 実装を1箇所に集約し、片方だけ直して挙動がずれる事故を防ぐ。
 
 export function firstPresent(values) {
-  return (
-    values.find((value) => value !== undefined && value !== null && String(value).trim() !== '') || ''
+  const value = values.find(
+    (candidate) => candidate !== undefined && candidate !== null && String(candidate).trim() !== '',
   );
+  return value ?? '';
 }
 
-export async function fetchWithTimeout(url, { timeoutMs = 15000, fetchImpl = fetch, ...options } = {}) {
+export async function fetchWithTimeout(
+  url,
+  { timeoutMs = 15000, fetchImpl = fetch, signal: parentSignal, ...options } = {},
+) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const parsedTimeout = Number(timeoutMs);
+  const durationMs = Number.isFinite(parsedTimeout) ? Math.max(1, parsedTimeout) : 15000;
+  const timeout = setTimeout(() => controller.abort(), durationMs);
+  const signal = parentSignal
+    ? AbortSignal.any([parentSignal, controller.signal])
+    : controller.signal;
 
   try {
     return await fetchImpl(url, {
       ...options,
-      signal: controller.signal,
+      signal,
     });
   } finally {
     clearTimeout(timeout);
@@ -22,17 +31,20 @@ export async function fetchWithTimeout(url, { timeoutMs = 15000, fetchImpl = fet
 }
 
 export function parseNextData(html) {
-  const idIndex = html.indexOf('__NEXT_DATA__');
-  if (idIndex === -1) return null;
-
-  const scriptStart = html.lastIndexOf('<script', idIndex);
-  const jsonStart = html.indexOf('>', scriptStart) + 1;
-  const jsonEnd = html.indexOf('</script>', jsonStart);
-  if (scriptStart === -1 || jsonStart === 0 || jsonEnd === -1) return null;
+  const match = String(html || '').match(
+    /<script\b(?=[^>]*\bid\s*=\s*["']__NEXT_DATA__["'])[^>]*>([\s\S]*?)<\/script\s*>/i,
+  );
+  if (!match) return null;
 
   try {
-    return JSON.parse(html.slice(jsonStart, jsonEnd));
+    return JSON.parse(match[1]);
   } catch {
     return null;
   }
+}
+
+export function errorMessage(error, fallback = 'Unknown error') {
+  if (error instanceof Error && error.message) return error.message;
+  const message = String(error ?? '').trim();
+  return message || fallback;
 }

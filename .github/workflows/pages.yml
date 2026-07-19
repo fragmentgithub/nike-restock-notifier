@@ -10,9 +10,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-  actions: write
 
 concurrency:
   group: github-pages
@@ -22,6 +19,13 @@ jobs:
   monitor-and-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    outputs:
+      next_due_minutes: ${{ steps.monitor.outputs.next_due_minutes }}
+      should_chain: ${{ steps.monitor.outputs.should_chain }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -47,6 +51,7 @@ jobs:
             nike-monitor-state-
 
       - name: Check Nike stock
+        id: monitor
         env:
           PRODUCT_URL: ${{ vars.PRODUCT_URL }}
           PRODUCT_URLS: ${{ vars.PRODUCT_URLS }}
@@ -87,16 +92,31 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v5
 
+
+  # 自己連鎖に必要な actions:write は短時間の専用ジョブだけへ付与する。
+  queue-next-run:
+    if: always()
+    needs: monitor-and-deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
       # cronの発火遅延(実測1時間超もある)に依存せず監視を連続させるための自己連鎖。
       # 実行が異常終了して連鎖が切れた場合はcronがバックアップとして再開する。
       - name: Queue next monitor run
-        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          NEXT_DUE_MINUTES: ${{ needs.monitor-and-deploy.outputs.next_due_minutes }}
+          SHOULD_CHAIN: ${{ needs.monitor-and-deploy.outputs.should_chain }}
         run: |
+          if [ "$SHOULD_CHAIN" != "true" ]; then
+            echo "Immediate chaining is unnecessary (next due: ${NEXT_DUE_MINUTES:-none} minutes); the cron backup will resume monitoring."
+            exit 0
+          fi
           waiting_count=0
           for status in queued pending waiting requested; do
-            count="$(gh run list --workflow pages.yml --status "$status" --limit 20 --json databaseId --jq 'length')"
+            count="$(gh run list --repo ${{ github.repository }} --workflow pages.yml --status "$status" --limit 20 --json databaseId --jq 'length')"
             waiting_count=$((waiting_count + count))
           done
           if [ "$waiting_count" -eq 0 ]; then

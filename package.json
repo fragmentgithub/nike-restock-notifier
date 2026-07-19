@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "check": "node --check scripts/monitor.js && node --check scripts/check-health.js && node --check scripts/serve-pages.js && node --check scripts/test-discord.js && node --check public/app.js",
     "discord:test": "node scripts/test-discord.js",
     "health": "node scripts/check-health.js",
     "monitor": "node scripts/monitor.js",
     "start": "node scripts/serve-pages.js",
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "npm run check && node --test \"test/**/*.test.js\""
   },
   "engines": {
     "node": ">=24"

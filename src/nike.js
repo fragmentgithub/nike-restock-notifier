@@ -1,5 +1,5 @@
 import { extractNikeMind001Products } from './discovery.js';
-import { fetchWithTimeout, firstPresent, parseNextData } from './util.js';
+import { errorMessage, fetchWithTimeout, firstPresent, parseNextData } from './util.js';
 
 const NIKE_CHANNEL_ID = 'd9a5bc42-4b9c-4976-858a-f159cf99c647';
 
@@ -34,6 +34,19 @@ export function parseNikeProductUrl(productUrl) {
     throw new Error('Nikeの商品URLを正しく入力してください。');
   }
 
+  if (url.hostname.toLowerCase() === 'nike.com') {
+    url.hostname = 'www.nike.com';
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname.toLowerCase() !== 'www.nike.com' ||
+    url.username ||
+    url.password ||
+    url.port
+  ) {
+    throw new Error('https://www.nike.com の商品URLを入力してください。');
+  }
+
   const styleColorMatch = url.pathname.match(/\/([A-Z0-9]{5,8}-[A-Z0-9]{3})(?:[/?#]|$)/i);
   const localeMatch = url.pathname.match(/^\/([a-z]{2})(?:\/|$)/i);
   const locale = (localeMatch?.[1] || 'jp').toLowerCase();
@@ -55,42 +68,35 @@ export function parseNikeProductUrl(productUrl) {
 export function normalizeSizeFilters(input) {
   if (!input) return [];
 
-  return String(input)
-    .split(',')
-    .map((value) => normalizeSize(value))
-    .filter(Boolean);
+  return [...new Set(
+    String(input)
+      .split(',')
+      .map((value) => normalizeSize(value))
+      .filter(Boolean),
+  )];
 }
 
 export function normalizeSize(value) {
   return String(value || '')
+    .normalize('NFKC')
     .toLowerCase()
     .replace(/\s+/g, '')
     .replace(/センチ/g, 'cm')
-    .replace(/ｃｍ/g, 'cm')
     .trim();
 }
 
 export function sizeMatches(size, filters) {
   if (!filters.length) return true;
 
-  const candidates = [
-    size.label,
-    size.localizedSize,
-    size.nikeSize,
-    size.size,
-    size.id,
-  ]
-    .map(normalizeSize)
-    .filter(Boolean);
-
-  return filters.some((filter) =>
-    candidates.some((candidate) => candidate.includes(filter) || filter.includes(candidate)),
-  );
+  const candidates = sizeMatchCandidates(size);
+  return filters.some((filter) => candidates.has(normalizeSize(filter)));
 }
 
 export async function checkNikeStock(productUrl, options = {}) {
   const productRef = parseNikeProductUrl(productUrl);
   const sizeFilters = normalizeSizeFilters(options.sizeFilters);
+  const timeoutMs = options.timeoutMs ?? 15000;
+  const fetchImpl = options.fetchImpl || fetch;
   const errors = [];
   let explicitNotFound = false;
 
@@ -100,7 +106,8 @@ export async function checkNikeStock(productUrl, options = {}) {
         ...DEFAULT_HEADERS,
         accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       },
-      timeoutMs: options.timeoutMs || 15000,
+      timeoutMs,
+      fetchImpl,
     });
 
     if (!response.ok) {
@@ -127,14 +134,15 @@ export async function checkNikeStock(productUrl, options = {}) {
       errors,
     };
   } catch (error) {
-    errors.push(`${error.message}: ${productRef.url}`);
+    errors.push(`${errorMessage(error)}: ${productRef.url}`);
   }
 
   for (const endpoint of buildProductFeedUrls(productRef)) {
     try {
       const response = await fetchWithTimeout(endpoint, {
         headers: DEFAULT_HEADERS,
-        timeoutMs: options.timeoutMs || 15000,
+        timeoutMs,
+        fetchImpl,
       });
 
       if (!response.ok) {
@@ -160,7 +168,7 @@ export async function checkNikeStock(productUrl, options = {}) {
 
       errors.push(`商品データが見つかりませんでした: ${endpoint}`);
     } catch (error) {
-      errors.push(`${error.message}: ${endpoint}`);
+      errors.push(`${errorMessage(error)}: ${endpoint}`);
     }
   }
 
@@ -188,6 +196,27 @@ export async function checkNikeStock(productUrl, options = {}) {
     notFound: explicitNotFound,
     errors,
   };
+}
+
+function sizeMatchCandidates(size) {
+  const candidates = new Set();
+  const descriptiveValues = [size.label, size.localizedSize, size.nikeSize, size.size];
+
+  for (const value of descriptiveValues) {
+    const normalized = normalizeSize(value);
+    if (!normalized) continue;
+    candidates.add(normalized);
+
+    for (const match of normalized.matchAll(/(?:us|uk|eu)?\d+(?:\.\d+)?(?:cm)?/g)) {
+      const token = match[0];
+      candidates.add(token);
+      if (token.endsWith('cm')) candidates.add(token.slice(0, -2));
+    }
+  }
+
+  const id = normalizeSize(size.id);
+  if (id) candidates.add(id);
+  return candidates;
 }
 
 function buildProductFeedUrls(productRef) {
@@ -222,7 +251,12 @@ function parseProductFeed(payload, productRef, sizeFilters) {
   }
 
   const product = buildProductFromFeed(matchingInfo, productRef);
-  const sizes = buildSizesFromFeed(matchingInfo);
+  const releaseAt = nextProductReleaseAt(matchingInfo);
+  const unavailableReason = feedProductUnavailableReason(matchingInfo, releaseAt);
+  const sizes = buildSizesFromFeed(matchingInfo).map((size) => ({
+    ...size,
+    available: unavailableReason ? false : size.available,
+  }));
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
 
@@ -232,10 +266,30 @@ function parseProductFeed(payload, productRef, sizeFilters) {
     availableSizes,
     matchingSizes,
     inStock: matchingSizes.length > 0,
-    statusLabel: statusLabelFor(sizes, matchingSizes, sizeFilters),
-    availabilityState: matchingSizes.length > 0 ? 'available' : 'out-of-stock',
-    releaseAt: null,
+    statusLabel: unavailableReason === 'coming-soon'
+      ? '販売開始前'
+      : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState: unavailableReason || (matchingSizes.length > 0 ? 'available' : 'out-of-stock'),
+    releaseAt,
   };
+}
+
+function feedProductUnavailableReason(info, releaseAt) {
+  const merchProduct = info?.merchProduct || {};
+  const productContent = info?.productContent || {};
+  const markers = [
+    merchProduct.status,
+    merchProduct.statusModifier,
+    merchProduct.commerceStatus,
+    merchProduct.publishType,
+    productContent.statusModifier,
+    ...asArray(productContent.featuredAttributes),
+  ].join(' ');
+  if (/COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers)) return 'coming-soon';
+
+  const releaseTimestamp = Date.parse(releaseAt || '');
+  if (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) return 'coming-soon';
+  return null;
 }
 
 function buildProductFromFeed(info, productRef) {
@@ -367,9 +421,9 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
   if (!selectedProduct) return null;
 
   const product = buildProductFromNextData(selectedProduct, pageProps, productRef);
-  const unavailableReason = nextProductUnavailableReason(selectedProduct);
-  const productUnavailable = Boolean(unavailableReason);
   const releaseAt = nextProductReleaseAt(selectedProduct);
+  const unavailableReason = nextProductUnavailableReason(selectedProduct, releaseAt);
+  const productUnavailable = Boolean(unavailableReason);
   const sizes = asArray(selectedProduct.sizes).map((size) => {
     const available = !productUnavailable && isNextSizeAvailable(size);
     const label = firstPresent([
@@ -435,11 +489,13 @@ function buildProductFromNextData(selectedProduct, pageProps, productRef) {
   };
 }
 
-function nextProductUnavailableReason(product) {
+function nextProductUnavailableReason(product, releaseAt) {
   const featuredAttributes = asArray(product.featuredAttributes).join(' ');
   const statusModifier = String(product.statusModifier || '');
   const markers = `${featuredAttributes} ${statusModifier}`;
   if (/COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers)) return 'coming-soon';
+  const releaseTimestamp = Date.parse(releaseAt || '');
+  if (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) return 'coming-soon';
   if (/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE/i.test(markers)) return 'out-of-stock';
   return null;
 }
