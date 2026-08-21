@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: monitor-health-watchdog
@@ -25,6 +26,14 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 24
+
+      - name: Recover stale monitor workflow
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MONITOR_REF: main
+          MONITOR_WAITING_STALE_MINUTES: ${{ vars.MONITOR_WAITING_STALE_MINUTES }}
+        run: node scripts/recover-monitor.js
 
       - name: Restore health state
         uses: actions/cache/restore@v6

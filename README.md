@@ -11,7 +11,7 @@ Nike Mind 001の全カラーを定期確認して、対象サイズが在庫あ�
 - 発売前商品は個別に短い間隔で確認し、通常商品へのアクセス頻度は維持します
 - 404/410が続く販売終了候補や長時間確認不能な商品は自動休止し、定期再確認または公式ページでの再検出時に復帰します
 - 在庫変化履歴と直近24時間の成功率・平均応答時間をGitHub Pagesに表示します
-- 独立した `health.yml` がPagesの更新停止と復旧をDiscordへ通知します
+- 独立した `health.yml` がPagesの更新停止と復旧をDiscordへ通知し、Pages承認待ちで固まった監視実行を自動解除します
 - 最新のステータスはGitHub Pagesに表示されます(ページの更新は実行単位なので最大25分程度遅れます。通知は即時です)
 
 ステータスページ: https://fragmentgithub.github.io/nike-restock-notifier/
@@ -38,6 +38,7 @@ GitHubのリポジトリ設定で以下を追加します。
 - Variable: `DISCORD_MENTION` 全商品共通のDiscordユーザー/ロールメンション。例 `<@&123456789>`
 - Variable: `STATUS_URL` watchdogが確認するstatus.json URL(通常は未設定で可)
 - Variable: `HEALTH_STALE_MINUTES` 更新停止と判定する時間(デフォルト50分)。実効閾値は誤報防止のため `LOOP_MINUTES + 20分` より短くなりません
+- Variable: `MONITOR_WAITING_STALE_MINUTES` Pages承認待ちで固まった監視実行を自動解除する時間(デフォルト90分、最小30分)
 
 `PRODUCT_URL`を設定しなくても、Mind 001の確認済みカラーが初期登録されます。検出した新カラーはActions cacheに保存され、以後の実行でも監視を継続します。
 
