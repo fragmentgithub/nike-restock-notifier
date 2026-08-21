@@ -55,6 +55,7 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
 - `.github/workflows/health.yml`
   - 15分ごとに公開 `status.json` の更新時刻を確認する独立watchdog。
   - デフォルト50分以上更新が止まるとDiscordへ1回だけ警告し、復旧時にも1回通知する。実効閾値は `max(HEALTH_STALE_MINUTES, LOOP_MINUTES + 20分)`。
+  - `github-pages` environmentの承認待ちで監視runが90分以上 `waiting` のまま固まった場合、そのrunをキャンセルする。後続のactive runがなければ `pages.yml` を再起動する。
   - `.health-state` をActions cacheで持ち回り、同じ異常の重複通知を防ぐ。
 
 - `scripts/monitor.js`(**商品別due時刻方式**)
@@ -151,7 +152,7 @@ Actions secrets:
 
 - `DISCORD_WEBHOOK`: Discord webhook URL。設定済み
 
-Actions variables(すべて任意。範囲/デフォルトは `scripts/monitor.js` の `clampNumber` に一致):
+Actions variables(すべて任意):
 
 - `SIZE_FILTERS`: カンマ区切り。例 `26,27`(空なら全サイズ)
 - `PRODUCT_URL`: 監視対象URLの上書き
@@ -170,6 +171,7 @@ Actions variables(すべて任意。範囲/デフォルトは `scripts/monitor.j
 - `DISCORD_MENTION`: Discordのユーザーまたはロールメンション
 - `STATUS_URL`: health watchdogが読むstatus.json URL
 - `HEALTH_STALE_MINUTES`: watchdogの更新停止閾値。10〜360、デフォルト50。実効値は `LOOP_MINUTES + 20分` 以上
+- `MONITOR_WAITING_STALE_MINUTES`: Pages承認待ちの監視runを自動解除する時間。30〜1440分、デフォルト90分
 
 GitHub PagesのソースはWorkflowベース。再有効化が必要な場合:
 
