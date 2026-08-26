@@ -11,6 +11,7 @@ import {
   DEFAULT_DISCOVERY_URL,
   DEFAULT_MIND_001_URLS,
   discoverNikeMind001Products,
+  isWomensNikeMind001Product,
 } from '../src/discovery.js';
 import {
   applyCheckState,
@@ -48,6 +49,13 @@ const MAX_CHECK_SAMPLES = 10000;
 
 const configuredProductUrls = splitUrls(process.env.PRODUCT_URLS);
 if (process.env.PRODUCT_URL) configuredProductUrls.push(process.env.PRODUCT_URL);
+const acceptedConfiguredProductUrls = configuredProductUrls.filter(
+  (url) => !isWomensNikeMind001Product({ url }),
+);
+const configuredPrimaryProductUrl = process.env.PRODUCT_URL &&
+  !isWomensNikeMind001Product({ url: process.env.PRODUCT_URL })
+  ? process.env.PRODUCT_URL
+  : '';
 const productConfigResult = parseProductConfigSafely(process.env.PRODUCT_CONFIG_JSON);
 if (productConfigResult.error) {
   console.warn(`${productConfigResult.error}; monitoring and notifications are disabled.`);
@@ -55,10 +63,10 @@ if (productConfigResult.error) {
 
 const config = {
   productUrl:
-    process.env.PRODUCT_URL ||
+    configuredPrimaryProductUrl ||
     DEFAULT_MIND_001_URLS.find((url) => url.endsWith('/HQ4307-005')) ||
     DEFAULT_MIND_001_URLS[0],
-  seedUrls: unique([...DEFAULT_MIND_001_URLS, ...configuredProductUrls]),
+  seedUrls: unique([...DEFAULT_MIND_001_URLS, ...acceptedConfiguredProductUrls]),
   discoveryUrl: process.env.DISCOVERY_URL || DEFAULT_DISCOVERY_URL,
   discoveryIntervalHours: clampNumber(process.env.DISCOVERY_INTERVAL_HOURS, 6, 1, 168),
   discoveryRetryMinutes: clampNumber(process.env.DISCOVERY_RETRY_MINUTES, 30, 5, 360),
@@ -80,9 +88,14 @@ await mkdir(STATE_DIR, { recursive: true });
 
 const state = await readJson(STATE_PATH, {});
 state.knownProducts = normalizeKnownProducts(state.knownProducts);
-const events = Array.isArray(state.events) ? state.events.slice(0, MAX_EVENTS) : [];
-const history = Array.isArray(state.history) ? state.history.slice(0, MAX_HISTORY) : [];
-state.checkSamples = normalizeCheckSamples(state.checkSamples);
+const events = Array.isArray(state.events)
+  ? state.events.filter((event) => !isWomensStateRecord(event)).slice(0, MAX_EVENTS)
+  : [];
+const history = Array.isArray(state.history)
+  ? state.history.filter((entry) => !isWomensStateRecord(entry)).slice(0, MAX_HISTORY)
+  : [];
+state.checkSamples = normalizeCheckSamples(state.checkSamples)
+  .filter((sample) => !isWomensStateRecord(sample));
 
 for (const url of config.seedUrls) addKnownProduct({ url }, 'initial');
 
@@ -416,6 +429,9 @@ function addKnownProduct(product, source) {
   }
 
   const styleColor = String(product.styleColor || parsed.styleColor).toUpperCase();
+  if (isWomensNikeMind001Product({ ...product, styleColor, url: product.url || parsed.url })) {
+    return { added: false, entry: null };
+  }
   const existing = state.knownProducts[styleColor];
   if (existing) {
     if (product.url) existing.url = product.url;
@@ -456,6 +472,12 @@ function normalizeKnownProducts(value) {
     try {
       const parsed = parseNikeProductUrl(product.url);
       const styleColor = String(product.styleColor || key || parsed.styleColor).toUpperCase();
+      if (isWomensNikeMind001Product({
+        ...product,
+        ...product.lastResult?.product,
+        styleColor,
+        url: product.url,
+      })) continue;
       normalized[styleColor] = {
         styleColor,
         url: product.url,
@@ -714,14 +736,26 @@ function configuredDiscordMention(value) {
 }
 
 function publicProductOverrides() {
-  return Object.fromEntries(Object.entries(config.productConfig).map(([styleColor, settings]) => [
-    styleColor,
-    {
-      sizeFilters: settings.sizeFilters,
-      notify: settings.notify,
-      enabled: settings.enabled,
-    },
-  ]));
+  return Object.fromEntries(
+    Object.entries(config.productConfig)
+      .filter(([styleColor]) => !isWomensNikeMind001Product({ styleColor }))
+      .map(([styleColor, settings]) => [
+        styleColor,
+        {
+          sizeFilters: settings.sizeFilters,
+          notify: settings.notify,
+          enabled: settings.enabled,
+        },
+      ]),
+  );
+}
+
+function isWomensStateRecord(record) {
+  return isWomensNikeMind001Product({
+    styleColor: record?.styleColor || record?.result?.product?.styleColor,
+    url: record?.url || record?.result?.product?.url,
+    contextText: JSON.stringify(record || {}),
+  });
 }
 
 // webhook URL(トークン)が公開 events / status.json 経由で GitHub Pages に漏れないよう、

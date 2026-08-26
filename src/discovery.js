@@ -3,6 +3,8 @@ import { fetchWithTimeout, firstPresent, parseNextData } from './util.js';
 const STYLE_COLOR_PATTERN = /^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/i;
 // \u30cf\u30a4\u30d5\u30f3\u3082\u8a31\u5bb9\u3059\u308b\uff08URL/slug \u306e "nike-mind-001" \u8868\u8a18\u3092\u53d6\u308a\u3053\u307c\u3055\u306a\u3044\u305f\u3081\uff09\u3002
 const MIND_001_PATTERN = /nike[\s\-\u00a0]*mind[\s\-\u00a0]*001/i;
+const WOMENS_TEXT_PATTERN = /(?:women(?:'s|s)?|\u30a6\u30a3\u30e1\u30f3\u30ba|\u30a6\u30a4\u30e1\u30f3\u30ba|\u30ec\u30c7\u30a3\u30fc\u30b9)/i;
+const WOMENS_STYLE_COLOR_PATTERN = /^HQ4309-/i;
 
 const DISCOVERY_HEADERS = {
   accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -19,10 +21,28 @@ export const DEFAULT_MIND_001_URLS = [
   'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005',
   'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-UMBfsYYs/HQ4307-200',
   'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-Rq84j0JD/HQ4307-300',
-  'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-Z6Ec8rYA/HQ4309-001',
-  'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-slikdOGA/HQ4309-400',
-  'https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-Z6Ec8rYA/HQ4309-601',
 ];
+
+export function isWomensNikeMind001Product(product = {}) {
+  const urlText = String(product.url || '');
+  const styleColor = String(
+    product.styleColor || urlText.match(/\/([A-Z0-9]{5,8}-[A-Z0-9]{3})(?:[/?#]|$)/i)?.[1] || '',
+  ).toUpperCase();
+  if (WOMENS_STYLE_COLOR_PATTERN.test(styleColor)) return true;
+
+  const text = [
+    urlText,
+    product.title,
+    product.fullTitle,
+    product.subtitle,
+    product.labelName,
+    product.contextText,
+  ]
+    .filter(Boolean)
+    .map(decodeText)
+    .join(' ');
+  return WOMENS_TEXT_PATTERN.test(text);
+}
 
 export async function discoverNikeMind001Products(options = {}) {
   const catalogUrl = options.catalogUrl || DEFAULT_DISCOVERY_URL;
@@ -61,25 +81,27 @@ export async function discoverNikeMind001Products(options = {}) {
 
 export function extractNikeMind001Products(html, sourceUrl = 'https://www.nike.com/jp/') {
   const found = new Map();
+  const excludedStyleColors = new Set();
   const normalizedHtml = normalizeEscapedHtml(html);
+
+  const nextData = parseNextData(normalizedHtml);
+  if (nextData) collectProductsFromValue(nextData, found, sourceUrl, excludedStyleColors);
 
   const linkPattern = /((?:https?:\/\/www\.nike\.com)?\/jp\/(?:[a-z]{2}\/)?t\/[^"'<>\\\s]*mind-001[^"'<>\\\s]*\/([A-Z0-9]{5,8}-[A-Z0-9]{3}))/gi;
   for (const match of normalizedHtml.matchAll(linkPattern)) {
+    if (excludedStyleColors.has(match[2].toUpperCase())) continue;
     addProduct(found, {
       styleColor: match[2],
       url: match[1],
     }, sourceUrl);
   }
 
-  const nextData = parseNextData(normalizedHtml);
-  if (nextData) collectProductsFromValue(nextData, found, sourceUrl);
-
   return [...found.values()].sort((a, b) => a.styleColor.localeCompare(b.styleColor));
 }
 
-function collectProductsFromValue(value, found, sourceUrl) {
+function collectProductsFromValue(value, found, sourceUrl, excludedStyleColors) {
   if (Array.isArray(value)) {
-    for (const item of value) collectProductsFromValue(item, found, sourceUrl);
+    for (const item of value) collectProductsFromValue(item, found, sourceUrl, excludedStyleColors);
     return;
   }
 
@@ -108,25 +130,33 @@ function collectProductsFromValue(value, found, sourceUrl) {
     .join(' ');
 
   if (STYLE_COLOR_PATTERN.test(String(styleColor || '')) && MIND_001_PATTERN.test(contextText)) {
-    addProduct(found, {
+    const product = {
       styleColor,
+      contextText,
       url: firstPresent([
         value.pdpUrl,
         value.url,
         value.productInfo?.url,
         value.productContent?.url,
       ]),
-    }, sourceUrl);
+    };
+    if (isWomensNikeMind001Product(product)) {
+      excludedStyleColors.add(String(styleColor).toUpperCase());
+      found.delete(String(styleColor).toUpperCase());
+    } else {
+      addProduct(found, product, sourceUrl);
+    }
   }
 
   for (const child of Object.values(value)) {
-    collectProductsFromValue(child, found, sourceUrl);
+    collectProductsFromValue(child, found, sourceUrl, excludedStyleColors);
   }
 }
 
 function addProduct(found, product, sourceUrl) {
   const styleColor = String(product.styleColor || '').toUpperCase();
   if (!STYLE_COLOR_PATTERN.test(styleColor)) return;
+  if (isWomensNikeMind001Product({ ...product, styleColor })) return;
 
   const url = productUrl(product.url, styleColor, sourceUrl);
   const previous = found.get(styleColor);
@@ -159,3 +189,10 @@ function normalizeEscapedHtml(value) {
     .replace(/&#39;/g, "'");
 }
 
+function decodeText(value) {
+  try {
+    return decodeURIComponent(String(value || ''));
+  } catch {
+    return String(value || '');
+  }
+}
