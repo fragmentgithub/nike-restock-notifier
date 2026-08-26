@@ -1,12 +1,13 @@
 # Nike Restock Notifier
 
-Nike Mind 001の全カラーを定期確認して、対象サイズが在庫ありになったらDiscordへ通知するアプリです。すべてGitHub上で動きます。
+Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメント」を含むNike商品を定期確認し、対象サイズが在庫ありになったらDiscordへ通知するアプリです。すべてGitHub上で動きます。
 
 ## 仕組み
 
 - GitHub Actionsが商品ごとの次回確認時刻を管理し、通常は各商品を約2分間隔で確認します
 - メンズの既知カラーを商品ごとに監視し、ウィメンズ商品は除外します
-- Nike公式の商品一覧と各商品ページを探索し、新カラーを自動的に追跡対象へ追加します
+- Nike公式の商品一覧・SNKRS・各商品ページを探索し、Mind 001の新カラーとFragment商品を自動的に追跡対象へ追加します
+- 確認済みの `Mind 001 x Fragment` と `Mind 002 x Fragment` は初期登録され、通常商品と同じ条件で通知します
 - 在庫が出たらその場でDiscord webhookへ通知します
 - 発売前商品は個別に短い間隔で確認し、通常商品へのアクセス頻度は維持します
 - 404/410が続く販売終了候補や長時間確認不能な商品は自動休止し、定期再確認または公式ページでの再検出時に復帰します
@@ -27,6 +28,7 @@ GitHubのリポジトリ設定で以下を追加します。
 - Variable: `INTERVAL_SECONDS` 通常商品の商品ごとの再確認間隔(デフォルト120秒、最小30秒)
 - Variable: `LOOP_MINUTES` 1回の実行がチェックし続ける分数(デフォルト25)
 - Variable: `DISCOVERY_URL` 新カラー探索に使うNike公式一覧URL(通常は未設定で可)
+- Variable: `FRAGMENT_DISCOVERY_URLS` Fragment探索に使うNike SNKRS一覧URL。カンマまたは改行区切り(通常は未設定で可)
 - Variable: `DISCOVERY_INTERVAL_HOURS` 新カラー探索間隔(デフォルト6時間)
 - Variable: `DISCOVERY_RETRY_MINUTES` 新カラー探索失敗時の再試行間隔(デフォルト30分)
 - Variable: `PRODUCT_CHECK_DELAY_MS` 商品間のアクセス待機時間(デフォルト1500ミリ秒)
@@ -40,7 +42,7 @@ GitHubのリポジトリ設定で以下を追加します。
 - Variable: `HEALTH_STALE_MINUTES` 更新停止と判定する時間(デフォルト50分)。実効閾値は誤報防止のため `LOOP_MINUTES + 20分` より短くなりません
 - Variable: `MONITOR_WAITING_STALE_MINUTES` Pages承認待ちで固まった監視実行を自動解除する時間(デフォルト90分、最小30分)
 
-`PRODUCT_URL`を設定しなくても、Mind 001の確認済みカラーが初期登録されます。検出した新カラーはActions cacheに保存され、以後の実行でも監視を継続します。
+`PRODUCT_URL`を設定しなくても、Mind 001の確認済みカラーと確認済みFragment商品が初期登録されます。検出した新商品はActions cacheに保存され、以後の実行でも監視を継続します。
 
 Secret設定後のテストは、GitHub Actionsの `Discord Test` workflowを手動実行します。
 
@@ -56,7 +58,7 @@ Secret設定後のテストは、GitHub Actionsの `Discord Test` workflowを手
     "enabled": true,
     "mention": "<@&123456789>"
   },
-  "HQ4309-400": {
+  "IQ8502-001": {
     "sizes": [],
     "notify": false
   }

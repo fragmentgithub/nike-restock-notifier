@@ -169,7 +169,7 @@ export function shouldStopDuringSweep({ singleSweep, deadline, now = Date.now() 
 
 export function collectMonitorErrors(products, discoveryError = '') {
   const errors = [];
-  if (discoveryError) errors.push(`新カラー探索: ${discoveryError}`);
+  if (discoveryError) errors.push(`商品探索: ${discoveryError}`);
 
   for (const product of products || []) {
     if (product.lastRuntimeError?.message) {

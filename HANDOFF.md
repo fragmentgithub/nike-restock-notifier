@@ -23,6 +23,7 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
 - GitHub Pages: https://fragmentgithub.github.io/nike-restock-notifier/
 - ライブステータス: https://fragmentgithub.github.io/nike-restock-notifier/status.json
 - 監視対象: https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005
+- Fragment監視対象: https://www.nike.com/jp/launch/t/mind-001-fragment-black / https://www.nike.com/jp/launch/t/mind-002-fragment-black
 
 ## 現在の状態
 
@@ -66,6 +67,7 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
     - `SIZE_FILTERS` variable(任意、カンマ区切り)
     - `INTERVAL_SECONDS` variable(任意、通常商品の商品ごとの再確認秒。30〜1800、デフォルト120。現在120を設定)
     - `LOOP_MINUTES` variable(任意、1回の実行のループ分数。0〜340、デフォルト25。0で単発チェック=デバッグ用)
+    - `FRAGMENT_DISCOVERY_URLS` variable(任意、Fragment商品を探索するSNKRS一覧URL。通常は未設定)
     - `DISCORD_WEBHOOK` secret(任意だが設定済み)
   - 書き込み(ループの各イテレーションで更新):
     - `.monitor-state/state.json`(Actions cacheのみ。gitには入れない。イベント履歴も持ち回る)
@@ -82,6 +84,7 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
 - `src/nike.js`
   - Nike在庫チェックのコア
   - NikeのPDP `__NEXT_DATA__` を最優先でパース
+  - SNKRS発売ページの `initialState` からFragment商品の発売状態・サイズ在庫をパース
   - フォールバック: ページテキスト解析、旧product feed APIの候補
   - パースが壊れたら `parseNextProductData` から調査する
 
@@ -160,6 +163,7 @@ Actions variables(すべて任意):
 - `INTERVAL_SECONDS`: 通常商品の商品ごとの再確認秒。30〜1800、デフォルト120。時間窓内の複数商品失敗が続くと最大10分まで自動バックオフ
 - `LOOP_MINUTES`: 1回のActions実行がチェックし続ける分数。0〜340、デフォルト25(0で単発チェック=デバッグ用)
 - `DISCOVERY_URL`: 新カラー探索に使うNike公式一覧URL(通常は未設定で可)
+- `FRAGMENT_DISCOVERY_URLS`: Fragment探索に使うSNKRS一覧URL。カンマまたは改行区切り(通常は未設定で可)
 - `DISCOVERY_INTERVAL_HOURS`: 新カラー探索間隔。1〜168、デフォルト6
 - `DISCOVERY_RETRY_MINUTES`: 探索失敗時の再試行間隔。5〜360、デフォルト30
 - `PRODUCT_CHECK_DELAY_MS`: 商品間のアクセス待機ミリ秒。0〜30000、デフォルト1500

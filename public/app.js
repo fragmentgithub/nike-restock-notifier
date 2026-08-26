@@ -61,10 +61,10 @@ function render(state) {
 
   const discoveryAt = state.discovery?.lastCheckedAt;
   discoveryHint.textContent = state.discovery?.lastError
-    ? `新カラー探索でエラー（既知商品は監視継続）: ${state.discovery.lastError}`
+    ? `商品探索でエラー（既知商品は監視継続）: ${state.discovery.lastError}`
     : discoveryAt
-      ? `新カラー自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
-      : '新カラー自動追尾: 初回探索待ち';
+      ? `新商品自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
+      : '新商品自動追尾: 初回探索待ち';
 
   runStatus.textContent = stale ? '更新遅延' : '自動監視中';
   runStatus.className = `status-pill ${stale ? 'error' : 'running'}`;
@@ -153,7 +153,7 @@ function renderProducts(products) {
     const product = result?.product || {};
     const sizes = result?.sizes || [];
     const availableSizes = sizes.filter((size) => size.available);
-    const title = product.title || `Nike Mind 001 ${item.styleColor}`;
+    const title = product.title || `Nike商品 ${item.styleColor}`;
     const subtitle = [product.subtitle, item.styleColor, product.price].filter(Boolean).join(' / ');
     const disabled = item.settings?.enabled === false;
     const paused = Boolean(item.pausedAt);

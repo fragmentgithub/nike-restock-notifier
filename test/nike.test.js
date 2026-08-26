@@ -8,6 +8,7 @@ import {
 } from '../src/nike.js';
 
 const PRODUCT_URL = 'https://www.nike.com/jp/t/nike-mind-001/HQ4307-005';
+const FRAGMENT_LAUNCH_URL = 'https://www.nike.com/jp/launch/t/mind-001-fragment-black';
 
 test('Nike公式HTTPSの商品URLだけを受け付ける', () => {
   assert.equal(
@@ -22,6 +23,43 @@ test('Nike公式HTTPSの商品URLだけを受け付ける', () => {
     () => parseNikeProductUrl('http://www.nike.com/jp/t/nike-mind-001/HQ4307-005'),
     /www\.nike\.com/,
   );
+  assert.equal(
+    parseNikeProductUrl(FRAGMENT_LAUNCH_URL, { styleColor: 'IQ8502-001' }).styleColor,
+    'IQ8502-001',
+  );
+  assert.throws(() => parseNikeProductUrl(FRAGMENT_LAUNCH_URL), /スタイルカラー/);
+});
+
+test('SNKRSのFragment発売ページから購入可能サイズを検出する', async () => {
+  const result = await checkWithSnkrsData({
+    isActive: true,
+    launchStatus: 'ACTIVE',
+    merchStatus: 'ACTIVE',
+    commerceStartDate: '2020-03-19T00:00:00Z',
+    skus: [snkrsSize('27', true, 'HIGH'), snkrsSize('28', false, 'OOS')],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'nike-snkrs-next-data');
+  assert.equal(result.product.styleColor, 'IQ8502-001');
+  assert.equal(result.product.title, 'Mind 001 x フラグメント');
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.matchingSizes.map((size) => size.label), ['27']);
+});
+
+test('SNKRSの発売前Fragment商品はサイズ在庫があっても通知対象にしない', async () => {
+  const result = await checkWithSnkrsData({
+    isActive: true,
+    launchStatus: 'ACTIVE',
+    merchStatus: 'ACTIVE',
+    commerceStartDate: '2099-03-19T00:00:00Z',
+    skus: [snkrsSize('27', true, 'HIGH')],
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.inStock, false);
+  assert.equal(result.statusLabel, '販売開始前');
+  assert.equal(result.availabilityState, 'coming-soon');
 });
 
 test('サイズは数値の部分一致ではなくサイズ単位で照合する', () => {
@@ -253,6 +291,53 @@ async function checkWithResponses(responses) {
   });
 }
 
+async function checkWithSnkrsData(overrides = {}) {
+  const productId = 'fragment-product';
+  const initialState = {
+    product: {
+      products: {
+        data: {
+          items: {
+            [productId]: {
+              styleColor: 'IQ8502-001',
+              title: 'ナイキ マインド 001 SP FK',
+              subtitle: 'メンズシューズ',
+              imageSrc: 'https://static.nike.com/fragment.png',
+              currentPrice: 13200,
+              currency: 'JPY',
+              ...overrides,
+            },
+          },
+        },
+      },
+      threads: {
+        data: {
+          items: {
+            fragment: {
+              active: overrides.launchStatus || 'ACTIVE',
+              coverCard: {
+                subtitle: 'Mind 001 x フラグメント',
+                title: 'Black',
+              },
+              cards: [{
+                actions: [{ product: { productId, styleColor: 'IQ8502-001' } }],
+              }],
+            },
+          },
+        },
+      },
+    },
+  };
+  const payload = {
+    props: { pageProps: { initialState: JSON.stringify(initialState) } },
+  };
+  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script>`;
+  return checkNikeStock(FRAGMENT_LAUNCH_URL, {
+    styleColor: 'IQ8502-001',
+    fetchImpl: async () => new Response(html),
+  });
+}
+
 function product(styleColor, overrides = {}) {
   return {
     styleColor,
@@ -273,5 +358,15 @@ function size(label, status) {
     localizedLabel: label,
     label,
     status,
+  };
+}
+
+function snkrsSize(label, available, level) {
+  return {
+    id: `snkrs-${label}`,
+    nike_size: label,
+    available,
+    level,
+    country_specifications: [{ localized_size: label }],
   };
 }

@@ -256,7 +256,7 @@ test('商品別エラーと探索エラーをまとめて保持する', () => {
   );
 
   assert.deepEqual(errors, [
-    '新カラー探索: catalog blocked',
+    '商品探索: catalog blocked',
     'HQ2-002: 確認できません',
   ]);
 });

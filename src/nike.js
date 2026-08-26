@@ -25,7 +25,7 @@ const DEFAULT_HEADERS = {
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
 };
 
-export function parseNikeProductUrl(productUrl) {
+export function parseNikeProductUrl(productUrl, options = {}) {
   let url;
 
   try {
@@ -48,17 +48,18 @@ export function parseNikeProductUrl(productUrl) {
   }
 
   const styleColorMatch = url.pathname.match(/\/([A-Z0-9]{5,8}-[A-Z0-9]{3})(?:[/?#]|$)/i);
+  const providedStyleColor = String(options.styleColor || '').toUpperCase();
   const localeMatch = url.pathname.match(/^\/([a-z]{2})(?:\/|$)/i);
   const locale = (localeMatch?.[1] || 'jp').toLowerCase();
   const market = MARKETPLACE_BY_PATH.get(locale) || MARKETPLACE_BY_PATH.get('jp');
 
-  if (!styleColorMatch) {
+  if (!styleColorMatch && !/^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/i.test(providedStyleColor)) {
     throw new Error('URLからスタイルカラーを読み取れませんでした。例: HQ4307-005');
   }
 
   return {
     url: url.toString(),
-    styleColor: styleColorMatch[1].toUpperCase(),
+    styleColor: (styleColorMatch?.[1] || providedStyleColor).toUpperCase(),
     locale,
     marketplace: market.marketplace,
     language: market.language,
@@ -93,7 +94,7 @@ export function sizeMatches(size, filters) {
 }
 
 export async function checkNikeStock(productUrl, options = {}) {
-  const productRef = parseNikeProductUrl(productUrl);
+  const productRef = parseNikeProductUrl(productUrl, { styleColor: options.styleColor });
   const sizeFilters = normalizeSizeFilters(options.sizeFilters);
   const timeoutMs = options.timeoutMs ?? 15000;
   const fetchImpl = options.fetchImpl || fetch;
@@ -354,7 +355,10 @@ function buildSizesFromFeed(info) {
 
 function parseProductPage(html, productRef, sizeFilters) {
   const nextData = parseNextData(html);
-  const nextParsed = nextData ? parseNextProductData(nextData, productRef, sizeFilters) : null;
+  const nextParsed = nextData
+    ? parseSnkrsProductData(nextData, productRef, sizeFilters) ||
+      parseNextProductData(nextData, productRef, sizeFilters)
+    : null;
   if (nextParsed) return nextParsed;
 
   const title =
@@ -404,6 +408,102 @@ function parseProductPage(html, productRef, sizeFilters) {
           : '在庫なし、またはページから判定不可',
     availabilityState: addToCart && !soldOut ? 'available' : soldOut ? 'out-of-stock' : 'unknown',
     releaseAt: null,
+  };
+}
+
+function parseSnkrsProductData(nextData, productRef, sizeFilters) {
+  const initialState = parseJsonObject(nextData?.props?.pageProps?.initialState);
+  const productItems = Object.values(initialState?.product?.products?.data?.items || {});
+  const selectedProduct = productItems.find(
+    (product) => String(product?.styleColor || '').toUpperCase() === productRef.styleColor,
+  );
+  if (!selectedProduct) return null;
+
+  const threads = Object.values(initialState?.product?.threads?.data?.items || {});
+  const selectedThread = threads.find((thread) => JSON.stringify(thread).includes(productRef.styleColor));
+  const coverCard = selectedThread?.coverCard || {};
+  const releaseAt = nextProductReleaseAt(selectedProduct);
+  const releaseTimestamp = Date.parse(releaseAt || '');
+  const markers = [
+    selectedProduct.launchStatus,
+    selectedProduct.merchStatus,
+    selectedThread?.active,
+  ].join(' ');
+  const comingSoon =
+    (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) ||
+    /COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers);
+  const explicitlyInactive =
+    selectedProduct.isActive === false ||
+    /(?:^|\s)INACTIVE(?:\s|$)/i.test(markers);
+  const productAvailable = !comingSoon && !explicitlyInactive;
+  const sizes = asArray(selectedProduct.skus).map((sku) => {
+    const level = String(sku?.level || '').toUpperCase();
+    const availableMarker =
+      sku?.available === true ||
+      sku?.available === 'true' ||
+      ['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE', 'ACTIVE'].includes(level);
+    const countrySpecification = asArray(
+      sku?.country_specifications || sku?.countrySpecifications,
+    )[0] || {};
+    const localizedSize = firstPresent([
+      countrySpecification.localized_size,
+      countrySpecification.localizedSize,
+      sku?.localized_size,
+      sku?.localizedSize,
+    ]);
+    const nikeSize = firstPresent([sku?.nike_size, sku?.nikeSize]);
+    const label = localizedSize || nikeSize || sku?.id || '';
+    const available = productAvailable && availableMarker;
+
+    return {
+      id: sku?.id || sku?.gtin || '',
+      label,
+      localizedSize: localizedSize || '',
+      nikeSize: nikeSize || '',
+      size: nikeSize || localizedSize || '',
+      available,
+      level: available ? level || 'AVAILABLE' : level || 'OOS',
+    };
+  });
+  const availableSizes = sizes.filter((size) => size.available);
+  const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const title = firstPresent([
+    coverCard.subtitle,
+    selectedProduct.title,
+    'Nike SNKRS product',
+  ]);
+
+  return {
+    product: {
+      title,
+      subtitle: selectedProduct.subtitle || coverCard.title || '',
+      styleColor: selectedProduct.styleColor || productRef.styleColor,
+      url: productRef.url,
+      imageUrl: firstPresent([
+        selectedProduct.imageSrc,
+        coverCard.notifyMeURL,
+        coverCard.defaultURL,
+      ]),
+      price: formatNextPrice({
+        currentPrice: selectedProduct.currentPrice,
+        initialPrice: selectedProduct.fullPrice,
+        currency: selectedProduct.currency || 'JPY',
+      }),
+    },
+    sizes,
+    availableSizes,
+    matchingSizes,
+    inStock: matchingSizes.length > 0,
+    statusLabel: comingSoon
+      ? '販売開始前'
+      : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState: comingSoon
+      ? 'coming-soon'
+      : matchingSizes.length > 0
+        ? 'available'
+        : 'out-of-stock',
+    releaseAt,
+    source: 'nike-snkrs-next-data',
   };
 }
 
@@ -692,7 +792,7 @@ function firstImageByTestId(html, testId) {
 }
 
 function isParsedPageUsable(parsed, html, productRef) {
-  if (parsed?.source === 'nike-next-data') return true;
+  if (parsed?.source === 'nike-next-data' || parsed?.source === 'nike-snkrs-next-data') return true;
 
   const title = String(parsed?.product?.title || '');
   const hasProductTitle = /nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title);
@@ -736,4 +836,14 @@ function decodeHtml(value) {
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function parseJsonObject(value) {
+  if (!value) return {};
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
 }

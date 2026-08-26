@@ -9,9 +9,12 @@ import {
 import { checkNikeStock, parseNikeProductUrl } from '../src/nike.js';
 import {
   DEFAULT_DISCOVERY_URL,
+  DEFAULT_FRAGMENT_DISCOVERY_URLS,
+  DEFAULT_FRAGMENT_PRODUCTS,
   DEFAULT_MIND_001_URLS,
+  discoverNikeFragmentProducts,
   discoverNikeMind001Products,
-  isWomensNikeMind001Product,
+  isWomensNikeProduct,
 } from '../src/discovery.js';
 import {
   applyCheckState,
@@ -50,10 +53,10 @@ const MAX_CHECK_SAMPLES = 10000;
 const configuredProductUrls = splitUrls(process.env.PRODUCT_URLS);
 if (process.env.PRODUCT_URL) configuredProductUrls.push(process.env.PRODUCT_URL);
 const acceptedConfiguredProductUrls = configuredProductUrls.filter(
-  (url) => !isWomensNikeMind001Product({ url }),
+  (url) => !isWomensNikeProduct({ url }),
 );
 const configuredPrimaryProductUrl = process.env.PRODUCT_URL &&
-  !isWomensNikeMind001Product({ url: process.env.PRODUCT_URL })
+  !isWomensNikeProduct({ url: process.env.PRODUCT_URL })
   ? process.env.PRODUCT_URL
   : '';
 const productConfigResult = parseProductConfigSafely(process.env.PRODUCT_CONFIG_JSON);
@@ -66,8 +69,16 @@ const config = {
     configuredPrimaryProductUrl ||
     DEFAULT_MIND_001_URLS.find((url) => url.endsWith('/HQ4307-005')) ||
     DEFAULT_MIND_001_URLS[0],
-  seedUrls: unique([...DEFAULT_MIND_001_URLS, ...acceptedConfiguredProductUrls]),
+  seedProducts: [
+    ...DEFAULT_MIND_001_URLS.map((url) => ({ url })),
+    ...DEFAULT_FRAGMENT_PRODUCTS,
+    ...acceptedConfiguredProductUrls.map((url) => ({ url })),
+  ],
   discoveryUrl: process.env.DISCOVERY_URL || DEFAULT_DISCOVERY_URL,
+  fragmentDiscoveryUrls:
+    splitUrls(process.env.FRAGMENT_DISCOVERY_URLS).length > 0
+      ? splitUrls(process.env.FRAGMENT_DISCOVERY_URLS)
+      : DEFAULT_FRAGMENT_DISCOVERY_URLS,
   discoveryIntervalHours: clampNumber(process.env.DISCOVERY_INTERVAL_HOURS, 6, 1, 168),
   discoveryRetryMinutes: clampNumber(process.env.DISCOVERY_RETRY_MINUTES, 30, 5, 360),
   sizeFilters: process.env.SIZE_FILTERS || '',
@@ -97,7 +108,9 @@ const history = Array.isArray(state.history)
 state.checkSamples = normalizeCheckSamples(state.checkSamples)
   .filter((sample) => !isWomensStateRecord(sample));
 
-for (const url of config.seedUrls) addKnownProduct({ url }, 'initial');
+for (const product of config.seedProducts) {
+  addKnownProduct(product, product.styleColor ? 'fragment-initial' : 'initial');
+}
 
 // 旧バージョンの単一商品通知状態を引き継ぐ。
 if (state.lastStockKey && state.knownProducts['HQ4307-005']?.lastStockKey === '') {
@@ -241,26 +254,50 @@ async function discoverProductsIfDue() {
   }
 
   const checkedAt = new Date().toISOString();
-  const discovery = await discoverNikeMind001Products({
-    catalogUrl: config.discoveryUrl,
-    timeoutMs: 20000,
-  });
+  const [mindDiscovery, fragmentDiscovery] = await Promise.all([
+    discoverNikeMind001Products({
+      catalogUrl: config.discoveryUrl,
+      timeoutMs: 20000,
+    }),
+    discoverNikeFragmentProducts({
+      catalogUrls: config.fragmentDiscoveryUrls,
+      timeoutMs: 20000,
+    }),
+  ]);
+  const discoveryErrors = [
+    mindDiscovery.error ? `Mind 001: ${mindDiscovery.error}` : '',
+    fragmentDiscovery.error ? `Fragment: ${fragmentDiscovery.error}` : '',
+  ].filter(Boolean);
   state.lastDiscoveryAt = checkedAt;
   state.lastDiscoveryAttemptAt = checkedAt;
-  state.lastDiscoveryError = discovery.error;
+  state.lastDiscoveryError = discoveryErrors.join(' / ') || null;
 
-  if (discovery.error) {
+  if (discoveryErrors.length) {
     pushEvent({
       id: `discovery-error-${Date.now()}`,
       type: 'error',
-      message: `新カラー探索に失敗しました: ${discovery.error}`,
+      message: `商品探索の一部または全部に失敗しました: ${state.lastDiscoveryError}`,
       at: checkedAt,
       result: null,
     });
-  } else {
+  }
+
+  const added = [];
+  const discoveredProducts = [...DEFAULT_FRAGMENT_PRODUCTS];
+  if (!mindDiscovery.error) {
+    added.push(...addKnownProducts(mindDiscovery.products, 'catalog'));
+    discoveredProducts.push(...mindDiscovery.products);
+  }
+  if (!fragmentDiscovery.error) {
+    added.push(...addKnownProducts(fragmentDiscovery.products, 'fragment-catalog'));
+    discoveredProducts.push(...fragmentDiscovery.products);
+  }
+
+  if (!discoveryErrors.length) {
     state.lastDiscoverySuccessAt = checkedAt;
-    const added = addKnownProducts(discovery.products, 'catalog');
-    const reprobe = updateCatalogPresence(trackedProducts(), discovery.products, checkedAt);
+  }
+  if (!mindDiscovery.error || !fragmentDiscovery.error) {
+    const reprobe = updateCatalogPresence(trackedProducts(), discoveredProducts, checkedAt);
     if (reprobe.length) {
       pushEvent({
         id: `catalog-reprobe-${Date.now()}`,
@@ -274,8 +311,8 @@ async function discoverProductsIfDue() {
       id: `discovery-${Date.now()}`,
       type: 'discovery',
       message: added.length
-        ? `新しいMind 001を検出: ${added.join(', ')}`
-        : `新カラー探索完了: ${trackedProducts().length}商品を追跡中`,
+        ? `新しい監視対象を検出: ${added.join(', ')}`
+        : `商品探索完了: ${trackedProducts().length}商品を追跡中`,
       at: checkedAt,
       result: null,
     });
@@ -288,11 +325,20 @@ async function runCheck(entry) {
   const settings = productSettings(entry);
   const startedAt = Date.now();
   const result = await checkNikeStock(entry.url, {
+    styleColor: entry.styleColor,
     sizeFilters: settings.sizeFilters,
     timeoutMs: 20000,
   });
   const durationMs = Date.now() - startedAt;
   const checkedAt = result.checkedAt || new Date().toISOString();
+  if (result.ok && isWomensNikeProduct(result.product)) {
+    delete state.knownProducts[entry.styleColor];
+    state.checkSamples = state.checkSamples.filter(
+      (sample) => sample?.styleColor !== entry.styleColor,
+    );
+    await persist(checkedAt);
+    return { notified: false, ok: true };
+  }
   const styleColor = result.product?.styleColor || entry.styleColor;
   updateUpcomingState(entry, result, { now: Date.parse(checkedAt) });
   const decision = notificationDecision(entry, result);
@@ -423,13 +469,13 @@ function addKnownProducts(products, source) {
 function addKnownProduct(product, source) {
   let parsed;
   try {
-    parsed = parseNikeProductUrl(product.url);
+    parsed = parseNikeProductUrl(product.url, { styleColor: product.styleColor });
   } catch {
     return { added: false, entry: null };
   }
 
   const styleColor = String(product.styleColor || parsed.styleColor).toUpperCase();
-  if (isWomensNikeMind001Product({ ...product, styleColor, url: product.url || parsed.url })) {
+  if (isWomensNikeProduct({ ...product, styleColor, url: product.url || parsed.url })) {
     return { added: false, entry: null };
   }
   const existing = state.knownProducts[styleColor];
@@ -470,9 +516,9 @@ function normalizeKnownProducts(value) {
   for (const [key, product] of Object.entries(value)) {
     if (!product?.url) continue;
     try {
-      const parsed = parseNikeProductUrl(product.url);
+      const parsed = parseNikeProductUrl(product.url, { styleColor: product.styleColor || key });
       const styleColor = String(product.styleColor || key || parsed.styleColor).toUpperCase();
-      if (isWomensNikeMind001Product({
+      if (isWomensNikeProduct({
         ...product,
         ...product.lastResult?.product,
         styleColor,
@@ -631,6 +677,7 @@ async function persist(updatedAt) {
       productUrls: products.map((product) => product.url),
       productCount: products.length,
       discoveryUrl: config.discoveryUrl,
+      fragmentDiscoveryUrls: config.fragmentDiscoveryUrls,
       discoveryIntervalHours: config.discoveryIntervalHours,
       discoveryRetryMinutes: config.discoveryRetryMinutes,
       sizeFilters: config.sizeFilters,
@@ -738,7 +785,7 @@ function configuredDiscordMention(value) {
 function publicProductOverrides() {
   return Object.fromEntries(
     Object.entries(config.productConfig)
-      .filter(([styleColor]) => !isWomensNikeMind001Product({ styleColor }))
+      .filter(([styleColor]) => !isWomensNikeProduct({ styleColor }))
       .map(([styleColor, settings]) => [
         styleColor,
         {
@@ -751,7 +798,7 @@ function publicProductOverrides() {
 }
 
 function isWomensStateRecord(record) {
-  return isWomensNikeMind001Product({
+  return isWomensNikeProduct({
     styleColor: record?.styleColor || record?.result?.product?.styleColor,
     url: record?.url || record?.result?.product?.url,
     contextText: JSON.stringify(record || {}),
