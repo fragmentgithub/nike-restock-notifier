@@ -7,13 +7,13 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <main class="app-shell" id="appShell" aria-busy="true">
       <section class="topbar">
         <div>
           <p class="eyebrow">Nike Restock Notifier</p>
           <h1>リストック監視</h1>
         </div>
-        <div class="status-pill" id="runStatus">停止中</div>
+        <div class="status-pill" id="runStatus" role="status" aria-live="polite" aria-atomic="true">読み込み中</div>
       </section>
 
       <section class="layout">
@@ -42,7 +42,7 @@
             </div>
           </div>
 
-          <p class="hint" id="discoveryHint">新商品自動追尾: 初回探索待ち</p>
+          <p class="hint" id="discoveryHint">新商品自動追尾: 読み込み中</p>
           <div class="pages-links">
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/pages.yml" target="_blank" rel="noreferrer">Monitor</a>
             <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/discord-test.yml" target="_blank" rel="noreferrer">Discord Test</a>
@@ -54,17 +54,17 @@
         <section class="panel current-panel">
           <div class="section-title">
             <h2>現在の状態</h2>
-            <div class="small-status" id="checkStatus">待機中</div>
+            <div class="small-status" id="checkStatus" role="status" aria-live="polite" aria-atomic="true">読み込み中</div>
           </div>
 
           <div class="metric-grid metric-grid-four">
             <div>
               <span>追跡商品</span>
-              <strong id="productCount">0</strong>
+              <strong id="productCount">-</strong>
             </div>
             <div>
               <span>在庫あり商品</span>
-              <strong id="availableProductCount">0</strong>
+              <strong id="availableProductCount">-</strong>
             </div>
             <div>
               <span>最終確認</span>
@@ -76,7 +76,7 @@
             </div>
           </div>
 
-          <p class="hint error-hint" id="monitorErrorHint" hidden></p>
+          <p class="hint error-hint" id="monitorErrorHint" role="alert" aria-live="assertive" hidden></p>
 
           <div class="product-grid" id="productGrid"></div>
         </section>
@@ -85,7 +85,7 @@
       <section class="panel insights-panel">
         <div class="section-title">
           <h2>監視品質（直近24時間）</h2>
-          <div class="small-status" id="qualityStatus">集計待ち</div>
+          <div class="small-status" id="qualityStatus" role="status" aria-live="polite" aria-atomic="true">読み込み中</div>
         </div>
         <div class="metric-grid quality-grid">
           <div><span>成功率</span><strong id="successRate">-</strong></div>

@@ -127,7 +127,12 @@ export function applyRuntimeFailure(
   };
 }
 
-export function updateCatalogPresence(entries, discoveredProducts, checkedAt = new Date().toISOString()) {
+export function updateCatalogPresence(
+  entries,
+  discoveredProducts,
+  checkedAt = new Date().toISOString(),
+  { markAbsent = true } = {},
+) {
   const discovered = new Set(
     (Array.isArray(discoveredProducts) ? discoveredProducts : [])
       .map((product) => String(product?.styleColor || '').toUpperCase())
@@ -147,7 +152,7 @@ export function updateCatalogPresence(entries, discoveredProducts, checkedAt = n
       }
       entry.catalogPresent = true;
       entry.lastCatalogSeenAt = checkedAt;
-    } else {
+    } else if (markAbsent) {
       entry.catalogPresent = false;
       entry.catalogReprobePending = false;
     }
@@ -164,7 +169,9 @@ export function recordStockTransition(
     oosThreshold = OOS_CLEAR_THRESHOLD,
   } = {},
 ) {
-  if (!result?.ok) return null;
+  // unknown は「在庫なし」ではなく観測不能。直前の履歴キーと確認回数を凍結し、
+  // パーサ情報が一時的に欠けただけで偽の全サイズ在庫なし履歴を作らない。
+  if (!result?.ok || result.availabilityState === 'unknown') return null;
   const nextKey = stockKey(result.availableSizes || []) || (result.inStock ? '__product__' : '');
   const previousKey = entry.lastObservedStockKey;
   const safeOosThreshold = Math.max(1, Number(oosThreshold) || OOS_CLEAR_THRESHOLD);
@@ -181,6 +188,23 @@ export function recordStockTransition(
     previousKey &&
     !nextKey &&
     entry.observedOosStreak < safeOosThreshold
+  ) {
+    return null;
+  }
+
+  // 具体サイズから商品レベル在庫へ情報が粗くなった観測は、在庫変化として確定しない。
+  // 具体サイズが再び得られた際の偽の「入荷」履歴を防ぐ。
+  if (isConcreteStockKey(previousKey) && nextKey === '__product__') {
+    return null;
+  }
+
+  // 前回サイズが1つでも欠ける変化は、新サイズ追加を同時に含む場合も、直前の信頼できる
+  // 観測が全く同じ構成だった場合だけ確定する。
+  // entry.lastResult は呼び出し時点では前回結果なので、追加の永続stateなしでrunをまたいだ
+  // 連続確認も判定できる。
+  if (
+    hasMissingConcreteStock(previousKey, nextKey) &&
+    reliableObservedStockKey(entry.lastResult) !== nextKey
   ) {
     return null;
   }
@@ -333,6 +357,22 @@ function normalizeSizeFilters(value) {
 
 function splitStockKey(value) {
   return String(value || '').split('|').filter(Boolean);
+}
+
+function reliableObservedStockKey(result) {
+  if (!result?.ok || result.availabilityState === 'unknown') return null;
+  return stockKey(result.availableSizes || []) || (result.inStock ? '__product__' : '');
+}
+
+function hasMissingConcreteStock(previousStockKey, nextStockKey) {
+  if (!isConcreteStockKey(previousStockKey) || !isConcreteStockKey(nextStockKey)) return false;
+  const previous = new Set(splitStockKey(previousStockKey));
+  const next = new Set(splitStockKey(nextStockKey));
+  return [...previous].some((size) => !next.has(size));
+}
+
+function isConcreteStockKey(value) {
+  return Boolean(value) && value !== '__product__';
 }
 
 function stockTransitionMessage(styleColor, added, removed, current) {

@@ -23,6 +23,16 @@ test('更新停止と不正なstatusを異常判定する', () => {
   assert.equal(evaluateMonitorHealth({}, {}).healthy, false);
 });
 
+test('現在時刻より大幅に先の更新時刻を正常扱いしない', () => {
+  const result = evaluateMonitorHealth(
+    { updatedAt: '2026-01-01T01:00:00Z' },
+    { now: Date.parse('2026-01-01T00:00:00Z') },
+  );
+
+  assert.equal(result.healthy, false);
+  assert.match(result.reason, /現在時刻より先/);
+});
+
 test('更新停止閾値は監視runの長さとPages反映余裕より短くならない', () => {
   const status = {
     updatedAt: '2026-01-01T00:00:00Z',

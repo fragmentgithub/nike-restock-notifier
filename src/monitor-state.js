@@ -11,6 +11,13 @@ export function stockKey(sizes = []) {
 // 在庫なしを確認してから初めてキーをクリアする。
 export const OOS_CLEAR_THRESHOLD = 2;
 
+// notificationDecision は runCheck が entry.lastResult を今回結果へ差し替える前、
+// applyCheckState は差し替えた後に呼ばれる。前回サイズが欠ける構成変化を確定するには
+// 「前回観測も同じ構成だったか」を前者で判定し、後者へ一時的に引き渡す。
+// WeakMap に置くことで永続stateへ内部フラグを混ぜず、runをまたぐ場合も保存済みの
+// lastResultから同じ判定を再構成できる。
+const stockCompositionConfirmations = new WeakMap();
+
 export function notificationDecision(entry, result) {
   const nextStockKey = stockKey(result.matchingSizes) || (result.inStock ? '__product__' : '');
   const previousStockKey = String(entry.lastStockKey || '');
@@ -26,15 +33,25 @@ export function notificationDecision(entry, result) {
   const addedSizes = previousStockKey === '__product__'
     ? nextSizes
     : nextSizes.filter((size) => !previousSizes.has(size));
+  const hasMissingPreviousSize = hasMissingConcreteStock(previousStockKey, nextStockKey);
+  const previousObservationKey = reliableResultStockKey(entry.lastResult, 'matchingSizes');
+  const compositionConfirmed =
+    hasMissingPreviousSize && previousObservationKey === nextStockKey;
+  stockCompositionConfirmations.set(entry, {
+    nextStockKey,
+    confirmed: compositionConfirmed,
+  });
   return {
     nextStockKey,
     previousStockKey,
     addedSizes,
     shouldNotify:
       result.ok === true &&
+      result.availabilityState !== 'unknown' &&
       result.inStock === true &&
       Boolean(nextStockKey) &&
-      (!previousStockKey || hasNewSize || firstConcreteSizes),
+      (!previousStockKey || hasNewSize || firstConcreteSizes) &&
+      (!hasMissingPreviousSize || compositionConfirmed),
   };
 }
 
@@ -43,9 +60,13 @@ export function applyCheckState(
   result,
   { nextStockKey, shouldNotify, notified, webhookConfigured },
 ) {
-  if (!result.ok) {
+  const stockCompositionConfirmation = stockCompositionConfirmations.get(entry);
+  stockCompositionConfirmations.delete(entry);
+
+  if (!result.ok || result.availabilityState === 'unknown') {
     // 取得失敗は「在庫なし」でも「在庫あり」でもない。直前までに得た OOS の
-    // 確認回数を凍結し、断続的なボットブロックで再入荷通知の再武装を妨げない。
+    // 確認回数を凍結する。取得自体が成功しても availabilityState が unknown なら
+    // 在庫なしの証拠にはならないため、同じく通知状態を変更しない。
     return entry.lastStockKey || '';
   }
 
@@ -58,6 +79,23 @@ export function applyCheckState(
   }
 
   entry.oosStreak = 0;
+  const previousStockKey = String(entry.lastStockKey || '');
+  // 前回の具体サイズが1つでも消えた観測は、新サイズ追加を同時に含む場合も、同じ構成を
+  // 2回連続で確認するまで確定しない。単発の置換フリッカによる双方向の誤通知を防ぐ。
+  if (
+    hasMissingConcreteStock(previousStockKey, nextStockKey) &&
+    !(
+      stockCompositionConfirmation?.nextStockKey === nextStockKey &&
+      stockCompositionConfirmation.confirmed
+    )
+  ) {
+    return entry.lastStockKey || '';
+  }
+  // 具体サイズから商品レベル在庫へ情報が粗くなっただけの場合も、具体サイズの確定状態を
+  // 保持する。サイズ情報が戻った際に全サイズを新規入荷扱いしないため。
+  if (isConcreteStockKey(previousStockKey) && nextStockKey === '__product__') {
+    return entry.lastStockKey || '';
+  }
   if (!shouldNotify || notified || !webhookConfigured) {
     entry.lastStockKey = nextStockKey;
   }
@@ -201,4 +239,20 @@ function timestampOrNow(value) {
     if (Number.isFinite(parsed)) return parsed;
   }
   return Date.now();
+}
+
+function reliableResultStockKey(result, sizesField) {
+  if (!result?.ok || result.availabilityState === 'unknown') return null;
+  return stockKey(result?.[sizesField] || []) || (result.inStock ? '__product__' : '');
+}
+
+function hasMissingConcreteStock(previousStockKey, nextStockKey) {
+  if (!isConcreteStockKey(previousStockKey) || !isConcreteStockKey(nextStockKey)) return false;
+  const previous = new Set(previousStockKey.split('|').filter(Boolean));
+  const next = new Set(nextStockKey.split('|').filter(Boolean));
+  return [...previous].some((size) => !next.has(size));
+}
+
+function isConcreteStockKey(value) {
+  return Boolean(value) && value !== '__product__';
 }

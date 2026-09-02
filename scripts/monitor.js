@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   discordAllowedMentions,
@@ -7,6 +7,7 @@ import {
   scrubDiscordWebhook,
 } from '../src/discord.js';
 import { checkNikeStock, parseNikeProductUrl } from '../src/nike.js';
+import { readJsonFile, writeJsonFileAtomic } from '../src/json-file.js';
 import {
   DEFAULT_DISCOVERY_URL,
   DEFAULT_FRAGMENT_DISCOVERY_URLS,
@@ -97,7 +98,7 @@ const config = {
 
 await mkdir(STATE_DIR, { recursive: true });
 
-const state = await readJson(STATE_PATH, {});
+const state = await readJsonFile(STATE_PATH, {});
 state.knownProducts = normalizeKnownProducts(state.knownProducts);
 const events = Array.isArray(state.events)
   ? state.events.filter((event) => !isWomensStateRecord(event)).slice(0, MAX_EVENTS)
@@ -283,30 +284,41 @@ async function discoverProductsIfDue() {
   }
 
   const added = [];
+  const observedProducts = [];
   const discoveredProducts = [...DEFAULT_FRAGMENT_PRODUCTS];
   if (!mindDiscovery.error) {
     added.push(...addKnownProducts(mindDiscovery.products, 'catalog'));
+    observedProducts.push(...mindDiscovery.products);
     discoveredProducts.push(...mindDiscovery.products);
   }
   if (!fragmentDiscovery.error) {
     added.push(...addKnownProducts(fragmentDiscovery.products, 'fragment-catalog'));
+    observedProducts.push(...fragmentDiscovery.products);
     discoveredProducts.push(...fragmentDiscovery.products);
   }
 
   if (!discoveryErrors.length) {
     state.lastDiscoverySuccessAt = checkedAt;
   }
+  // A partial discovery can prove that an observed product is present, but it
+  // cannot prove that products from the failed catalog family are absent.
+  const completeDiscovery = !mindDiscovery.error && !fragmentDiscovery.error;
+  const reprobe = updateCatalogPresence(
+    trackedProducts(),
+    completeDiscovery ? discoveredProducts : observedProducts,
+    checkedAt,
+    { markAbsent: completeDiscovery },
+  );
+  if (reprobe.length) {
+    pushEvent({
+      id: `catalog-reprobe-${Date.now()}`,
+      type: 'lifecycle',
+      message: `カタログへ再出現したため即時再確認: ${reprobe.join(', ')}`,
+      at: checkedAt,
+      result: null,
+    });
+  }
   if (!mindDiscovery.error || !fragmentDiscovery.error) {
-    const reprobe = updateCatalogPresence(trackedProducts(), discoveredProducts, checkedAt);
-    if (reprobe.length) {
-      pushEvent({
-        id: `catalog-reprobe-${Date.now()}`,
-        type: 'lifecycle',
-        message: `カタログへ再出現したため即時再確認: ${reprobe.join(', ')}`,
-        at: checkedAt,
-        result: null,
-      });
-    }
     pushEvent({
       id: `discovery-${Date.now()}`,
       type: 'discovery',
@@ -712,8 +724,8 @@ async function persist(updatedAt) {
     events,
   };
 
-  await writeFile(STATE_PATH, JSON.stringify(state, null, 2), 'utf8');
-  await writeFile(STATUS_PATH, JSON.stringify(publicStatus, null, 2), 'utf8');
+  await writeJsonFileAtomic(STATE_PATH, state);
+  await writeJsonFileAtomic(STATUS_PATH, publicStatus, { backup: false });
 }
 
 function pushEvent(event) {
@@ -746,14 +758,6 @@ function groupCheckSamplesByProduct(samples) {
     grouped.set(styleColor, productSamples);
   }
   return grouped;
-}
-
-async function readJson(filePath, fallback) {
-  try {
-    return JSON.parse(await readFile(filePath, 'utf8'));
-  } catch {
-    return fallback;
-  }
 }
 
 async function writeActionOutput(name, value) {

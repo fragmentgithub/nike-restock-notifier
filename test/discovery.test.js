@@ -110,6 +110,39 @@ test('複数のSNKRS一覧からFragment商品を重複なく探索する', asyn
   assert.deepEqual(result.products.map((product) => product.styleColor), ['IQ8504-002']);
 });
 
+test('Fragment探索はHTTP 200のシェルHTMLを解析成功扱いしない', async () => {
+  const catalogUrls = [
+    'https://www.nike.com/jp/launch',
+    'https://www.nike.com/jp/launch?s=upcoming',
+  ];
+  const result = await discoverNikeFragmentProducts({
+    catalogUrls,
+    fetchImpl: async () => new Response('<html><body>SNKRS shell</body></html>'),
+  });
+
+  assert.deepEqual(result.products, []);
+  assert.match(result.error, /カタログ構造を解析できませんでした/);
+  assert.equal(result.warnings.length, catalogUrls.length);
+});
+
+test('有効なSNKRSカタログ構造ならFragmentが0件でも探索成功とする', async () => {
+  const result = await discoverNikeFragmentProducts({
+    catalogUrls: [
+      'https://www.nike.com/jp/launch',
+      'https://www.nike.com/jp/launch?s=upcoming',
+    ],
+    fetchImpl: async (url) => new Response(
+      url.includes('upcoming')
+        ? '<html><body>SNKRS shell</body></html>'
+        : fragmentLaunchPayload([]),
+    ),
+  });
+
+  assert.deepEqual(result.products, []);
+  assert.equal(result.error, null);
+  assert.equal(result.warnings.length, 1);
+});
+
 test('__NEXT_DATA__内のウィメンズ商品を除外する', () => {
   const payload = {
     props: {

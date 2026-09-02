@@ -9,7 +9,7 @@
   --green-soft: #dff0e4;
   --red: #a43f3a;
   --red-soft: #f5dfdb;
-  --amber: #a06b17;
+  --amber: #754b00;
   --amber-soft: #f4ead6;
   --blue: #245c8f;
   --shadow: 0 18px 60px rgba(27, 27, 29, 0.08);
@@ -157,7 +157,7 @@ h3 {
 .pages-links a {
   display: inline-flex;
   align-items: center;
-  min-height: 34px;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 0 10px;
@@ -204,6 +204,11 @@ a {
 
 a:hover {
   text-decoration: underline;
+}
+
+a:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 3px;
 }
 
 .metric-grid {

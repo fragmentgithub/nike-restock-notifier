@@ -125,8 +125,11 @@ export async function discoverNikeFragmentProducts(options = {}) {
       });
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
 
-      const products = extractNikeFragmentProducts(await response.text(), catalogUrl);
-      for (const product of products) found.set(product.styleColor, product);
+      const catalog = parseNikeFragmentCatalog(await response.text(), catalogUrl);
+      if (!catalog.parseable) {
+        throw new Error('Nike SNKRS一覧のカタログ構造を解析できませんでした');
+      }
+      for (const product of catalog.products) found.set(product.styleColor, product);
       successfulSources += 1;
     } catch (error) {
       errors.push(`${catalogUrl}: ${error.message || String(error)}`);
@@ -142,11 +145,21 @@ export async function discoverNikeFragmentProducts(options = {}) {
 }
 
 export function extractNikeFragmentProducts(html, sourceUrl = 'https://www.nike.com/jp/launch') {
+  return parseNikeFragmentCatalog(html, sourceUrl).products;
+}
+
+function parseNikeFragmentCatalog(html, sourceUrl) {
   const found = new Map();
   const nextData = parseNextData(normalizeEscapedHtml(html));
   const initialState = parseInitialState(nextData?.props?.pageProps?.initialState);
-  const threads = Object.values(initialState?.product?.threads?.data?.items || {});
-  const productItems = Object.values(initialState?.product?.products?.data?.items || {});
+  const threadItems = initialState?.product?.threads?.data?.items;
+  const rawProductItems = initialState?.product?.products?.data?.items;
+  const parseable = isCatalogItemCollection(threadItems) &&
+    isCatalogItemCollection(rawProductItems);
+  if (!parseable) return { products: [], parseable: false };
+
+  const threads = Object.values(threadItems);
+  const productItems = Object.values(rawProductItems);
   const productsByStyleColor = new Map(productItems.map((product) => [
     String(product?.styleColor || '').toUpperCase(),
     product,
@@ -182,7 +195,10 @@ export function extractNikeFragmentProducts(html, sourceUrl = 'https://www.nike.
     }
   }
 
-  return [...found.values()].sort((a, b) => a.styleColor.localeCompare(b.styleColor));
+  return {
+    products: [...found.values()].sort((a, b) => a.styleColor.localeCompare(b.styleColor)),
+    parseable: true,
+  };
 }
 
 export function extractNikeMind001Products(html, sourceUrl = 'https://www.nike.com/jp/') {
@@ -311,4 +327,8 @@ function parseInitialState(value) {
   } catch {
     return {};
   }
+}
+
+function isCatalogItemCollection(value) {
+  return Array.isArray(value) || (value !== null && typeof value === 'object');
 }

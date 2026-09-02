@@ -20,17 +20,43 @@ const lastSuccess = document.querySelector('#lastSuccess');
 const activeProductCount = document.querySelector('#activeProductCount');
 const pausedProductCount = document.querySelector('#pausedProductCount');
 const monitorErrorHint = document.querySelector('#monitorErrorHint');
+const appShell = document.querySelector('#appShell');
+
+const REFRESH_INTERVAL_MS = 60000;
+const STATUS_TIMEOUT_MS = 15000;
+let refreshInFlight = false;
+let lastGoodState = null;
 
 await refreshState();
-setInterval(refreshState, 60000);
+setInterval(() => void refreshState(), REFRESH_INTERVAL_MS);
 
 async function refreshState() {
+  if (refreshInFlight) return;
+
+  refreshInFlight = true;
+  appShell.setAttribute('aria-busy', 'true');
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
+
   try {
-    const response = await fetch('status.json', { cache: 'no-store' });
+    const response = await fetch('status.json', {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
     if (!response.ok) throw new Error(`status.json: ${response.status}`);
-    render(await response.json());
+    const state = await response.json();
+    validateStatusPayload(state);
+    render(state);
+    lastGoodState = state;
   } catch (error) {
-    renderUnavailable(error.message);
+    const message = error?.name === 'AbortError'
+      ? `${STATUS_TIMEOUT_MS / 1000}秒以内に応答がありませんでした`
+      : error?.message || '不明なエラー';
+    renderUnavailable(message, { preserveData: Boolean(lastGoodState) });
+  } finally {
+    clearTimeout(timeoutId);
+    refreshInFlight = false;
+    appShell.setAttribute('aria-busy', 'false');
   }
 }
 
@@ -66,12 +92,21 @@ function render(state) {
       ? `新商品自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
       : '新商品自動追尾: 初回探索待ち';
 
-  runStatus.textContent = stale ? '更新遅延' : '自動監視中';
+  setText(runStatus, stale ? '更新遅延' : '自動監視中');
   runStatus.className = `status-pill ${stale ? 'error' : 'running'}`;
-  checkStatus.textContent = monitorErrors.length ? `${monitorErrors.length}件エラー` : '正常';
-  checkStatus.className = `small-status ${monitorErrors.length ? 'error' : 'ok'}`;
-  monitorErrorHint.hidden = monitorErrors.length === 0;
-  monitorErrorHint.textContent = monitorErrors.join(' / ');
+  const statusMessages = stale
+    ? ['ステータスの更新が遅延しています。表示内容は最新でない可能性があります。', ...monitorErrors]
+    : monitorErrors;
+  setText(checkStatus, stale
+    ? '状態不明'
+    : monitorErrors.length
+      ? `${monitorErrors.length}件エラー`
+      : '正常');
+  checkStatus.className = `small-status ${stale || monitorErrors.length ? 'error' : 'ok'}`;
+  monitorErrorHint.setAttribute('role', 'status');
+  monitorErrorHint.setAttribute('aria-live', 'polite');
+  monitorErrorHint.hidden = statusMessages.length === 0;
+  setText(monitorErrorHint, statusMessages.join(' / '));
 
   productCount.textContent = String(products.length);
   availableProductCount.textContent = String(availableCount);
@@ -81,31 +116,58 @@ function render(state) {
       ? formatDate(state.updatedAt)
       : '-';
   const monitorableCount = products.filter((item) => item.settings?.enabled !== false).length;
-  nextCheck.textContent = state.nextCheckAt
-    ? formatDate(state.nextCheckAt)
-    : monitorableCount > 0
-      ? `商品ごと 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`
-      : '監視対象なし';
+  nextCheck.textContent = stale
+    ? '更新遅延のため不明'
+    : state.nextCheckAt
+      ? formatDate(state.nextCheckAt)
+      : monitorableCount > 0
+        ? `商品ごと 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`
+        : '監視対象なし';
 
   renderProducts(products);
-  renderQuality(state.metrics || {});
+  renderQuality(state.metrics || {}, { stale });
   renderStockHistory(state.history || []);
   renderEvents(state.events || []);
 }
 
-function renderUnavailable(message) {
-  runStatus.textContent = '取得失敗';
+function validateStatusPayload(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    throw new Error('status.json の形式が不正です');
+  }
+  if (!Number.isFinite(Date.parse(state.updatedAt || ''))) {
+    throw new Error('status.json に有効な更新時刻がありません');
+  }
+  if (state.products !== undefined && !Array.isArray(state.products)) {
+    throw new Error('status.json の商品データ形式が不正です');
+  }
+}
+
+function renderUnavailable(message, { preserveData = false } = {}) {
+  setText(runStatus, '取得失敗');
   runStatus.className = 'status-pill error';
-  checkStatus.textContent = 'エラー';
+  setText(checkStatus, preserveData ? '更新エラー' : 'エラー');
   checkStatus.className = 'small-status error';
+  monitorErrorHint.setAttribute('role', 'alert');
+  monitorErrorHint.setAttribute('aria-live', 'assertive');
+  monitorErrorHint.hidden = false;
+  setText(monitorErrorHint, preserveData
+    ? `最新ステータスを取得できません。前回取得したデータを表示しています: ${message}`
+    : `ステータス取得エラー: ${message}`);
+
+  if (preserveData) {
+    nextCheck.textContent = '最新情報を取得できません';
+    setText(qualityStatus, '更新エラー');
+    qualityStatus.className = 'small-status error';
+    return;
+  }
+
   productCount.textContent = '-';
   availableProductCount.textContent = '-';
   lastChecked.textContent = '-';
   nextCheck.textContent = '-';
-  monitorErrorHint.hidden = false;
-  monitorErrorHint.textContent = `ステータス取得エラー: ${message}`;
+  discoveryHint.textContent = '新商品自動追尾: ステータス取得失敗';
   productGrid.innerHTML = `<p class="empty-state">ステータスを取得できません: ${escapeHtml(message)}</p>`;
-  qualityStatus.textContent = '取得失敗';
+  setText(qualityStatus, '取得失敗');
   qualityStatus.className = 'small-status error';
   for (const element of [successRate, averageResponse, checks24h, lastSuccess, activeProductCount, pausedProductCount]) {
     element.textContent = '-';
@@ -204,11 +266,14 @@ function renderProducts(products) {
   }).join('');
 }
 
-function renderQuality(metrics) {
+function renderQuality(metrics, { stale = false } = {}) {
   const hasChecks = Number(metrics.checks) > 0;
   const healthy = hasChecks && Number(metrics.successRate) >= 90;
-  qualityStatus.textContent = hasChecks ? (healthy ? '良好' : '要確認') : '集計待ち';
-  qualityStatus.className = `small-status ${healthy ? 'ok' : hasChecks ? 'error' : ''}`;
+  setText(
+    qualityStatus,
+    stale ? '更新遅延' : hasChecks ? (healthy ? '良好' : '要確認') : '集計待ち',
+  );
+  qualityStatus.className = `small-status ${stale ? 'error' : healthy ? 'ok' : hasChecks ? 'error' : ''}`;
   successRate.textContent = formatPercent(metrics.successRate);
   averageResponse.textContent = metrics.averageResponseMs !== null
     && metrics.averageResponseMs !== undefined
@@ -248,12 +313,21 @@ function renderEvents(events) {
 
 function isStatusStale(state, config, products) {
   const lastCheckedAt = state.updatedAt || latestDate(products.map((item) => item.lastResult?.checkedAt));
-  if (!lastCheckedAt) return false;
-  const intervalSeconds = Number(config.intervalSeconds || 120);
+  if (!lastCheckedAt) return true;
+  const lastCheckedTimestamp = Date.parse(lastCheckedAt);
+  if (!Number.isFinite(lastCheckedTimestamp)) return true;
+  const configuredIntervalSeconds = Number(config.intervalSeconds);
+  const intervalSeconds = Number.isFinite(configuredIntervalSeconds) && configuredIntervalSeconds > 0
+    ? configuredIntervalSeconds
+    : 120;
   const configuredLoopMinutes = Number(config.loopMinutes);
-  const loopMinutes = Number.isFinite(configuredLoopMinutes) ? configuredLoopMinutes : 25;
+  const loopMinutes = Number.isFinite(configuredLoopMinutes) && configuredLoopMinutes >= 0
+    ? configuredLoopMinutes
+    : 25;
   const staleAfterSeconds = Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
-  return Date.now() - new Date(lastCheckedAt).getTime() > staleAfterSeconds * 1000;
+  const ageMs = Date.now() - lastCheckedTimestamp;
+  // A materially future timestamp is just as untrustworthy as an old one.
+  return ageMs < -5 * 60 * 1000 || ageMs > staleAfterSeconds * 1000;
 }
 
 function latestDate(values) {
@@ -299,4 +373,9 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function setText(element, value) {
+  const text = String(value ?? '');
+  if (element.textContent !== text) element.textContent = text;
 }

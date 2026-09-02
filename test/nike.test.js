@@ -196,6 +196,8 @@ test('HTML断片の未知サイズを購入ボタンなしで在庫扱いしな�
   assert.equal(result.ok, true);
   assert.equal(result.inStock, false);
   assert.equal(result.sizes[0].available, false);
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.statusLabel, 'サイズ情報あり・在庫判定不可');
 });
 
 test('API代替取得で指定カラーが無ければ別カラーを採用しない', async () => {
@@ -267,6 +269,29 @@ test('商品タイトルだけを残したブロックページもAPIフォー�
     </html>`;
   const result = await checkWithResponses([
     new Response(blockHtml),
+    new Response('{}'),
+    new Response('{}'),
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.inStock, false);
+  assert.match(result.errors[0], /商品データをページから読み取れませんでした/);
+});
+
+test('商品構造があっても別カラーのHTMLを指定カラーの在庫扱いしない', async () => {
+  const wrongColorHtml = `
+    <html>
+      <head>
+        <link rel="canonical" href="https://www.nike.com/jp/t/nike-mind-001/HQ4307-003">
+        <meta property="og:title" content="Nike Mind 001">
+      </head>
+      <body>
+        <div id="size-selector"><button>27</button></div>
+        <button>カートに追加</button>
+      </body>
+    </html>`;
+  const result = await checkWithResponses([
+    new Response(wrongColorHtml),
     new Response('{}'),
     new Response('{}'),
   ]);

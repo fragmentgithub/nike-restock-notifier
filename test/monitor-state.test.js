@@ -58,6 +58,26 @@ test('取得失敗を挟んでも在庫なし確認回数を凍結して再入�
   assert.equal(entry.oosStreak, 2);
 });
 
+test('在庫状態unknownは在庫なし確認に数えず通知状態を保持する', () => {
+  const available = stockResult(['27']);
+  const entry = { lastStockKey: '27', oosStreak: 1, lastResult: available };
+  const unknown = {
+    ok: true,
+    inStock: false,
+    availabilityState: 'unknown',
+    matchingSizes: [],
+  };
+
+  applyObservedResult(entry, unknown);
+  applyObservedResult(entry, unknown);
+
+  assert.equal(entry.lastStockKey, '27');
+  assert.equal(entry.oosStreak, 1);
+  const restored = notificationDecision(entry, available);
+  assert.equal(restored.shouldNotify, false);
+  assert.deepEqual(restored.addedSizes, []);
+});
+
 test('汎用在庫(__product__)から具体サイズが判明したら通知する', () => {
   const entry = { lastStockKey: '__product__' };
   const result = {
@@ -80,17 +100,74 @@ test('汎用在庫(__product__)が続く間は再通知しない', () => {
   assert.equal(decision.shouldNotify, false);
 });
 
-test('在庫サイズが減っただけでは再通知しない', () => {
-  const entry = { lastStockKey: '27|28' };
-  const result = {
-    ok: true,
-    inStock: true,
-    matchingSizes: [{ label: '27', available: true }],
-  };
+test('単発の一部サイズ欠落から復帰しても重複通知しない', () => {
+  const fullStock = stockResult(['27', '28']);
+  const entry = { lastStockKey: '27|28', lastResult: fullStock };
 
-  const decision = notificationDecision(entry, result);
-  assert.equal(decision.nextStockKey, '27');
-  assert.equal(decision.shouldNotify, false);
+  const reduced = applyObservedResult(entry, stockResult(['27']));
+  assert.equal(reduced.nextStockKey, '27');
+  assert.equal(reduced.shouldNotify, false);
+  assert.equal(entry.lastStockKey, '27|28');
+
+  const restored = applyObservedResult(entry, fullStock);
+  assert.equal(restored.shouldNotify, false);
+  assert.deepEqual(restored.addedSizes, []);
+  assert.equal(entry.lastStockKey, '27|28');
+});
+
+test('同じ一部サイズ欠落を連続確認した後だけ再入荷通知を再武装する', () => {
+  const fullStock = stockResult(['27', '28']);
+  const reducedStock = stockResult(['27']);
+  const entry = { lastStockKey: '27|28', lastResult: fullStock };
+
+  applyObservedResult(entry, reducedStock);
+  applyObservedResult(entry, reducedStock);
+  assert.equal(entry.lastStockKey, '27');
+
+  const restored = notificationDecision(entry, fullStock);
+  assert.equal(restored.shouldNotify, true);
+  assert.deepEqual(restored.addedSizes, ['28']);
+});
+
+test('異なる一部サイズ欠落は連続確認として扱わない', () => {
+  const fullStock = stockResult(['27', '28', '29']);
+  const entry = { lastStockKey: '27|28|29', lastResult: fullStock };
+
+  applyObservedResult(entry, stockResult(['27', '28']));
+  applyObservedResult(entry, stockResult(['27', '29']));
+  assert.equal(entry.lastStockKey, '27|28|29');
+
+  const restored = notificationDecision(entry, fullStock);
+  assert.equal(restored.shouldNotify, false);
+});
+
+test('新サイズを含む集合置換が1回だけなら復帰時も通知しない', () => {
+  const fullStock = stockResult(['27', '28']);
+  const entry = { lastStockKey: '27|28', lastResult: fullStock };
+
+  const replaced = applyObservedResult(entry, stockResult(['27', '29']));
+  assert.equal(replaced.shouldNotify, false);
+  assert.deepEqual(replaced.addedSizes, ['29']);
+  assert.equal(entry.lastStockKey, '27|28');
+
+  const restored = applyObservedResult(entry, fullStock);
+  assert.equal(restored.shouldNotify, false);
+  assert.equal(entry.lastStockKey, '27|28');
+});
+
+test('同じ集合置換を連続確認した後だけ新サイズを通知してキーを更新する', () => {
+  const fullStock = stockResult(['27', '28']);
+  const replacedStock = stockResult(['27', '29']);
+  const entry = { lastStockKey: '27|28', lastResult: fullStock };
+
+  const first = applyObservedResult(entry, replacedStock);
+  assert.equal(first.shouldNotify, false);
+  assert.equal(entry.lastStockKey, '27|28');
+
+  const second = applyObservedResult(entry, replacedStock);
+  assert.equal(second.shouldNotify, true);
+  assert.deepEqual(second.addedSizes, ['29']);
+  assert.equal(entry.lastStockKey, '27|29');
 });
 
 test('新しく在庫になったサイズがあれば再通知する', () => {
@@ -260,3 +337,24 @@ test('商品別エラーと探索エラーをまとめて保持する', () => {
     'HQ2-002: 確認できません',
   ]);
 });
+
+function stockResult(labels) {
+  return {
+    ok: true,
+    inStock: labels.length > 0,
+    availabilityState: labels.length > 0 ? 'available' : 'out-of-stock',
+    matchingSizes: labels.map((label) => ({ label, available: true })),
+  };
+}
+
+function applyObservedResult(entry, result) {
+  // scripts/monitor.js と同じ順序: decision は前回 lastResult を参照し、その後に今回結果を保存する。
+  const decision = notificationDecision(entry, result);
+  entry.lastResult = result;
+  applyCheckState(entry, result, {
+    ...decision,
+    notified: decision.shouldNotify,
+    webhookConfigured: true,
+  });
+  return decision;
+}

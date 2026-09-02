@@ -12,16 +12,20 @@ export function planMonitorRecovery(
 ) {
   const thresholdMinutes = clampNumber(staleMinutes, 90, 30, 1440);
   const thresholdMs = thresholdMinutes * 60_000;
-  const activeRuns = Array.isArray(runs)
-    ? runs.filter((run) => ACTIVE_RUN_STATUSES.has(run?.status))
-    : [];
+  const activeRuns = deduplicateActiveRuns(
+    Array.isArray(runs)
+      ? runs.filter((run) => ACTIVE_RUN_STATUSES.has(run?.status))
+      : [],
+  );
   const staleWaitingRuns = activeRuns.filter((run) => {
     if (run.status !== 'waiting') return false;
     const createdAt = Date.parse(run.created_at || run.createdAt || '');
     return Number.isFinite(createdAt) && now - createdAt >= thresholdMs;
   });
   const staleIds = new Set(staleWaitingRuns.map((run) => String(run.id)));
-  const remainingActiveRuns = activeRuns.filter((run) => !staleIds.has(String(run.id)));
+  const remainingActiveRuns = activeRuns.filter(
+    (run) => run.status !== 'waiting' || !staleIds.has(String(run.id)),
+  );
 
   return {
     thresholdMinutes,
@@ -64,18 +68,22 @@ export async function recoverStaleMonitorRuns({
     };
   }
 
-  const otherActiveRuns = [];
-  for (const status of ['in_progress', 'pending', 'queued', 'requested']) {
-    const list = await githubRequest(
-      `${workflowRunsUrl}?status=${status}&per_page=100`,
-      { token: authToken, fetchImpl },
-    );
-    otherActiveRuns.push(...(list?.workflow_runs || []));
-  }
+  const otherActiveRuns = await listWorkflowRuns(
+    workflowRunsUrl,
+    ['in_progress', 'pending', 'queued', 'requested'],
+    { token: authToken, fetchImpl },
+  );
   const plan = planMonitorRecovery([...waitingRuns, ...otherActiveRuns], { now, staleMinutes });
   const cancelledRunIds = [];
 
   for (const run of plan.staleWaitingRuns) {
+    const currentRun = await githubRequest(
+      `${baseUrl}/actions/runs/${encodeURIComponent(String(run.id))}`,
+      { token: authToken, fetchImpl },
+    );
+    const currentPlan = planMonitorRecovery([currentRun], { now, staleMinutes });
+    if (currentPlan.staleWaitingRuns.length === 0) continue;
+
     const response = await githubRequest(
       `${baseUrl}/actions/runs/${run.id}/cancel`,
       { token: authToken, fetchImpl, method: 'POST', allowConflict: true },
@@ -83,8 +91,18 @@ export async function recoverStaleMonitorRuns({
     if (!response?.conflict) cancelledRunIds.push(run.id);
   }
 
+  // Cancellation and runner acquisition are asynchronous. Re-read every
+  // active status before dispatching so a run that advanced while this check
+  // was executing prevents a duplicate monitor run.
+  const refreshedActiveRuns = await listWorkflowRuns(
+    workflowRunsUrl,
+    ['waiting', 'in_progress', 'pending', 'queued', 'requested'],
+    { token: authToken, fetchImpl },
+  );
+  const currentActiveRuns = deduplicateActiveRuns(refreshedActiveRuns);
+
   let dispatched = false;
-  if (plan.shouldDispatch) {
+  if (currentActiveRuns.length === 0) {
     await githubRequest(
       `${baseUrl}/actions/workflows/${workflowPath}/dispatches`,
       {
@@ -101,9 +119,36 @@ export async function recoverStaleMonitorRuns({
     thresholdMinutes: plan.thresholdMinutes,
     staleWaitingRunIds: plan.staleWaitingRuns.map((run) => run.id),
     cancelledRunIds,
-    remainingActiveRunIds: plan.remainingActiveRuns.map((run) => run.id),
+    remainingActiveRunIds: currentActiveRuns.map((run) => run.id),
     dispatched,
   };
+}
+
+async function listWorkflowRuns(workflowRunsUrl, statuses, { token, fetchImpl }) {
+  const runs = [];
+  for (const status of statuses) {
+    const list = await githubRequest(
+      `${workflowRunsUrl}?status=${status}&per_page=100`,
+      { token, fetchImpl },
+    );
+    runs.push(...(list?.workflow_runs || []));
+  }
+  return runs;
+}
+
+function deduplicateActiveRuns(runs) {
+  const byId = new Map();
+  for (const run of runs || []) {
+    const id = String(run?.id ?? '');
+    if (!id) continue;
+    const existing = byId.get(id);
+    // A non-waiting observation comes from a later status-filtered request and
+    // proves the run has already left the approval queue.
+    if (!existing || (existing.status === 'waiting' && run.status !== 'waiting')) {
+      byId.set(id, run);
+    }
+  }
+  return [...byId.values()];
 }
 
 async function githubRequest(url, {

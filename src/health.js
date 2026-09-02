@@ -1,4 +1,7 @@
-export function evaluateMonitorHealth(status, { now = Date.now(), staleMinutes = 50 } = {}) {
+export function evaluateMonitorHealth(
+  status,
+  { now = Date.now(), staleMinutes = 50, futureToleranceMinutes = 5 } = {},
+) {
   const configurationError = String(status?.config?.productConfigError || '').trim();
   if (configurationError) {
     return {
@@ -11,6 +14,15 @@ export function evaluateMonitorHealth(status, { now = Date.now(), staleMinutes =
   const updatedAt = Date.parse(status?.updatedAt || '');
   if (!Number.isFinite(updatedAt)) {
     return { healthy: false, reason: 'status.json に有効な updatedAt がありません', updatedAt: null, ageMinutes: null };
+  }
+  const futureToleranceMs = Math.max(0, Number(futureToleranceMinutes) || 0) * 60_000;
+  if (updatedAt - now > futureToleranceMs) {
+    return {
+      healthy: false,
+      reason: 'status.json の updatedAt が現在時刻より先になっています',
+      updatedAt: new Date(updatedAt).toISOString(),
+      ageMinutes: null,
+    };
   }
   const ageMinutes = Math.max(0, Math.floor((now - updatedAt) / 60000));
   const configuredThreshold = Math.max(5, Number(staleMinutes) || 50);

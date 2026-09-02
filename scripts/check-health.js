@@ -1,5 +1,6 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { normalizeDiscordWebhook, postDiscordWebhook } from '../src/discord.js';
+import { readJsonFile, writeJsonFileAtomic } from '../src/json-file.js';
 import {
   evaluateMonitorHealth,
   evaluateStatusFetchFailure,
@@ -16,7 +17,7 @@ const webhook = configuredDiscordWebhook(process.env.DISCORD_WEBHOOK || '');
 const staleMinutes = clampNumber(process.env.HEALTH_STALE_MINUTES, 50, 10, 360);
 
 await mkdir(STATE_DIR, { recursive: true });
-const previous = await readJson(STATE_PATH, {});
+const previous = await readJsonFile(STATE_PATH, {});
 let status = null;
 let health;
 let fetchFailureStreak = 0;
@@ -40,14 +41,14 @@ if (shouldNotifyHealthTransition(previous.notifiedStatus, currentState) && webho
   notifiedStatus = currentState;
 }
 
-await writeFile(STATE_PATH, JSON.stringify({
+await writeJsonFileAtomic(STATE_PATH, {
   status: currentState,
   checkedAt: new Date().toISOString(),
   statusUpdatedAt: health.updatedAt,
   reason: health.reason,
   notifiedStatus,
   fetchFailureStreak,
-}, null, 2), 'utf8');
+});
 
 console.log(JSON.stringify({ status: currentState, changed, ...health }, null, 2));
 
@@ -66,14 +67,6 @@ async function sendHealthNotification(url, result, pageUrl) {
       timestamp: new Date().toISOString(),
     }],
   });
-}
-
-async function readJson(path, fallback) {
-  try {
-    return JSON.parse(await readFile(path, 'utf8'));
-  } catch {
-    return fallback;
-  }
 }
 
 function validHttpUrl(value, name) {

@@ -183,6 +183,36 @@ test('休止商品はカタログから消えた後の再出現時だけ即時�
   assert.equal(entry.pausedAt, null);
 });
 
+test('部分探索では再出現だけ反映し未検出商品の状態を変更しない', () => {
+  const rediscovered = {
+    styleColor: 'HQ1-001',
+    pausedAt: '2026-01-01T00:00:00Z',
+    pausedReason: 'delisted',
+    catalogPresent: false,
+    catalogReprobePending: false,
+  };
+  const unobserved = {
+    styleColor: 'IQ2-002',
+    pausedAt: '2026-01-01T00:00:00Z',
+    pausedReason: 'delisted',
+    catalogPresent: true,
+    catalogReprobePending: true,
+  };
+
+  const reprobe = updateCatalogPresence(
+    [rediscovered, unobserved],
+    [{ styleColor: 'HQ1-001' }],
+    '2026-01-02T00:00:00Z',
+    { markAbsent: false },
+  );
+
+  assert.deepEqual(reprobe, ['HQ1-001']);
+  assert.equal(rediscovered.catalogPresent, true);
+  assert.equal(rediscovered.catalogReprobePending, true);
+  assert.equal(unobserved.catalogPresent, true);
+  assert.equal(unobserved.catalogReprobePending, true);
+});
+
 test('在庫サイズの変化だけ履歴へ追加する', () => {
   const entry = { styleColor: 'HQ1-001' };
   assert.equal(recordStockTransition(entry, { ok: true, availableSizes: [] }), null);
@@ -236,6 +266,128 @@ test('通知対象サイズのOOSストリークを全サイズ履歴の確定�
   }), null);
   assert.equal(entry.lastObservedStockKey, '28');
   assert.equal(entry.observedOosStreak, 1);
+});
+
+test('在庫状態unknownは在庫なし履歴を作らず観測状態を保持する', () => {
+  const fullStock = observedStockResult(['27']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27',
+    observedOosStreak: 1,
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+  const unknown = {
+    ok: true,
+    inStock: false,
+    availabilityState: 'unknown',
+    availableSizes: [],
+  };
+
+  assert.equal(recordObservedResult(entry, unknown), null);
+  assert.equal(recordObservedResult(entry, unknown), null);
+  assert.equal(entry.lastObservedStockKey, '27');
+  assert.equal(entry.observedOosStreak, 1);
+  assert.deepEqual(entry.stockHistory, []);
+
+  assert.equal(recordObservedResult(entry, fullStock), null);
+  assert.deepEqual(entry.stockHistory, []);
+});
+
+test('単発の一部サイズ欠落から復帰しても偽の在庫履歴を作らない', () => {
+  const fullStock = observedStockResult(['27', '28']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27|28',
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+
+  assert.equal(recordObservedResult(entry, observedStockResult(['27'])), null);
+  assert.equal(entry.lastObservedStockKey, '27|28');
+  assert.equal(recordObservedResult(entry, fullStock), null);
+  assert.equal(entry.lastObservedStockKey, '27|28');
+  assert.deepEqual(entry.stockHistory, []);
+});
+
+test('同じ一部サイズ欠落を連続確認した後だけ履歴へ確定する', () => {
+  const fullStock = observedStockResult(['27', '28']);
+  const reducedStock = observedStockResult(['27']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27|28',
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+
+  assert.equal(recordObservedResult(entry, reducedStock), null);
+  const transition = recordObservedResult(entry, reducedStock);
+  assert.deepEqual(transition.removed, ['28']);
+  assert.deepEqual(transition.added, []);
+  assert.equal(entry.lastObservedStockKey, '27');
+});
+
+test('異なる一部サイズ欠落は連続確認として履歴へ確定しない', () => {
+  const fullStock = observedStockResult(['27', '28', '29']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27|28|29',
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+
+  assert.equal(recordObservedResult(entry, observedStockResult(['27', '28'])), null);
+  assert.equal(recordObservedResult(entry, observedStockResult(['27', '29'])), null);
+  assert.equal(entry.lastObservedStockKey, '27|28|29');
+  assert.deepEqual(entry.stockHistory, []);
+});
+
+test('新サイズを含む集合置換が1回だけなら復帰時も偽履歴を作らない', () => {
+  const fullStock = observedStockResult(['27', '28']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27|28',
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+
+  assert.equal(recordObservedResult(entry, observedStockResult(['27', '29'])), null);
+  assert.equal(entry.lastObservedStockKey, '27|28');
+  assert.equal(recordObservedResult(entry, fullStock), null);
+  assert.equal(entry.lastObservedStockKey, '27|28');
+  assert.deepEqual(entry.stockHistory, []);
+});
+
+test('同じ集合置換を連続確認した後だけ入荷と欠落を履歴へ確定する', () => {
+  const fullStock = observedStockResult(['27', '28']);
+  const replacedStock = observedStockResult(['27', '29']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27|28',
+    lastResult: fullStock,
+    stockHistory: [],
+  };
+
+  assert.equal(recordObservedResult(entry, replacedStock), null);
+  const transition = recordObservedResult(entry, replacedStock);
+  assert.deepEqual(transition.added, ['29']);
+  assert.deepEqual(transition.removed, ['28']);
+  assert.equal(entry.lastObservedStockKey, '27|29');
+});
+
+test('前回サイズを失わない純粋な追加は1回で履歴へ確定する', () => {
+  const previousStock = observedStockResult(['27']);
+  const entry = {
+    styleColor: 'HQ1-001',
+    lastObservedStockKey: '27',
+    lastResult: previousStock,
+    stockHistory: [],
+  };
+
+  const transition = recordObservedResult(entry, observedStockResult(['27', '28']));
+  assert.deepEqual(transition.added, ['28']);
+  assert.deepEqual(transition.removed, []);
+  assert.equal(entry.lastObservedStockKey, '27|28');
 });
 
 test('発売前商品だけ短い間隔で再確認する', () => {
@@ -358,3 +510,19 @@ test('品質指標はサンプル0件をnull表示し未来時刻を除外する
   assert.equal(metrics.checks, 0);
   assert.equal(metrics.successRate, null);
 });
+
+function observedStockResult(labels) {
+  return {
+    ok: true,
+    inStock: labels.length > 0,
+    availabilityState: labels.length > 0 ? 'available' : 'out-of-stock',
+    availableSizes: labels.map((label) => ({ label, available: true })),
+  };
+}
+
+function recordObservedResult(entry, result) {
+  // scripts/monitor.js と同じ順序: 履歴判定後に今回結果を lastResult として保存する。
+  const transition = recordStockTransition(entry, result);
+  entry.lastResult = result;
+  return transition;
+}

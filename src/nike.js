@@ -119,7 +119,7 @@ export async function checkNikeStock(productUrl, options = {}) {
 
     const html = await response.text();
     const parsed = parseProductPage(html, productRef, sizeFilters);
-    if (!isParsedPageUsable(parsed, html, productRef)) {
+    if (!isParsedPageUsable(parsed, html, productRef, response.url)) {
       throw new Error('Nikeの商品データをページから読み取れませんでした');
     }
     const relatedProducts = extractNikeMind001Products(html, productRef.url);
@@ -384,6 +384,11 @@ function parseProductPage(html, productRef, sizeFilters) {
   );
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = addToCart && !soldOut
+    ? 'available'
+    : soldOut
+      ? 'out-of-stock'
+      : 'unknown';
 
   return {
     product: {
@@ -399,14 +404,18 @@ function parseProductPage(html, productRef, sizeFilters) {
     matchingSizes,
     inStock: matchingSizes.length > 0 || (sizeFilters.length === 0 && addToCart && !soldOut),
     statusLabel:
-      sizes.length > 0
-        ? statusLabelFor(sizes, matchingSizes, sizeFilters)
-        : soldOut
-          ? '在庫なし'
-          : addToCart && !soldOut
-          ? '販売中の可能性あり'
-          : '在庫なし、またはページから判定不可',
-    availabilityState: addToCart && !soldOut ? 'available' : soldOut ? 'out-of-stock' : 'unknown',
+      availabilityState === 'unknown'
+        ? sizes.length > 0
+          ? 'サイズ情報あり・在庫判定不可'
+          : '在庫なし、またはページから判定不可'
+        : sizes.length > 0
+          ? statusLabelFor(sizes, matchingSizes, sizeFilters)
+          : soldOut
+            ? '在庫なし'
+            : addToCart && !soldOut
+              ? '販売中の可能性あり'
+              : '在庫なし、またはページから判定不可',
+    availabilityState,
     releaseAt: null,
   };
 }
@@ -791,11 +800,29 @@ function firstImageByTestId(html, testId) {
   return attrValue(attrs, 'src');
 }
 
-function isParsedPageUsable(parsed, html, productRef) {
+function isParsedPageUsable(parsed, html, productRef, responseUrl = '') {
   if (parsed?.source === 'nike-next-data' || parsed?.source === 'nike-snkrs-next-data') return true;
 
   const title = String(parsed?.product?.title || '');
   const hasProductTitle = /nike[\s\u00a0]*mind[\s\u00a0]*001/i.test(title);
+  const canonicalTag = html.match(
+    /<link\b(?=[^>]*\brel=["']canonical["'])[^>]*>/i,
+  )?.[0] || '';
+  const openGraphUrlTag = html.match(
+    /<meta\b(?=[^>]*\bproperty=["']og:url["'])[^>]*>/i,
+  )?.[0] || '';
+  const explicitProductReferences = [
+    responseUrl,
+    attrValue(canonicalTag, 'href'),
+    attrValue(openGraphUrlTag, 'content'),
+    title,
+  ];
+  const hasConflictingStyleColor = explicitProductReferences.some((value) => {
+    const styleColors = [...String(value || '').matchAll(/[A-Z0-9]{5,8}-[A-Z0-9]{3}/gi)]
+      .map((match) => match[0].toUpperCase());
+    return styleColors.length > 0 && !styleColors.includes(productRef.styleColor);
+  });
+  if (hasConflictingStyleColor) return false;
 
   // \u30b9\u30bf\u30a4\u30eb\u30ab\u30e9\u30fc\u306e\u6587\u5b57\u5217\u4e00\u81f4\u3060\u3051\u3092\u4fe1\u983c\u3059\u308b\u3068\u3001\u8981\u6c42URL\u3092\u672c\u6587\u3078\u53cd\u5c04\u3059\u308b
   // \u30d6\u30ed\u30c3\u30af/\u30a8\u30e9\u30fc\u30da\u30fc\u30b8\u3092\u300c\u4f7f\u7528\u53ef\u300d\u3068\u8aa4\u5224\u5b9a\u3057\u3001product_feed API\u3078\u306e\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\u3092
