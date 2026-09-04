@@ -409,6 +409,23 @@ test('発売前180分から発売後60分までを優先確認する', () => {
   assert.equal(isUpcomingPriority(entry, Date.parse('2026-01-01T04:01:00Z'), 180), false);
 });
 
+test('発売時刻不明の商品は従来状態の最終確認から4時間だけ優先する', () => {
+  const startedAt = Date.parse('2026-01-01T00:00:00Z');
+  const entry = {
+    lastSeenAt: new Date(startedAt).toISOString(),
+    lastResult: { availabilityState: 'coming-soon', releaseAt: null },
+  };
+  assert.equal(isUpcomingPriority(entry, startedAt + 4 * 3600000 - 1), true);
+  assert.equal(isUpcomingPriority(entry, startedAt + 4 * 3600000), false);
+
+  updateUpcomingState(entry, entry.lastResult, { now: startedAt + 5 * 3600000 });
+  assert.equal(entry.unknownUpcomingStartedAt, new Date(startedAt).toISOString());
+  assert.equal(isUpcomingPriority(structuredClone(entry), startedAt + 5 * 3600000), false);
+
+  entry.lastResult = { availabilityState: 'out-of-stock', releaseAt: null };
+  assert.equal(isUpcomingPriority(entry, startedAt + 60000), false);
+});
+
 test('発売前情報は1回のフォールバック観測で失わない', () => {
   const entry = {
     lastResult: {

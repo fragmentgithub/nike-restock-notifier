@@ -176,6 +176,99 @@ test('upcoming items keep the thirty second cadence across cache rehydration', a
   assert.equal(next.status().lastResult.availabilityState, 'coming-soon');
 });
 
+test('three simultaneous upcoming items use a sixty second floor without changing normal cadence', () => {
+  const timestamp = Date.now();
+  const styles = [TARGET, OTHER, 'HQ4307-001', 'HQ4307-200'];
+  const stateWith = (upcomingCount) => cache(timestamp, {}, {
+    knownProducts: Object.fromEntries(styles.map((styleColor, index) => [styleColor, {
+      styleColor, url: urlFor(styleColor), lastSeenAt: iso(timestamp),
+      lastResult: index < upcomingCount
+        ? { availabilityState: 'coming-soon', releaseAt: iso(timestamp + 3600000) }
+        : { availabilityState: 'out-of-stock', releaseAt: null },
+    }])),
+  });
+
+  const twoUpcoming = createMonitorEngine({
+    env: environment(styles), state: stateWith(2), now: () => timestamp,
+  });
+  assert.equal(twoUpcoming.nextAlarmAt(), timestamp + 30000);
+
+  const threeUpcoming = createMonitorEngine({
+    env: environment(styles), state: stateWith(3), now: () => timestamp,
+  });
+  assert.equal(threeUpcoming.nextAlarmAt(), timestamp + 60000);
+  assert.equal(threeUpcoming.status().config.intervalSeconds, 120);
+
+  const configuredSlower = createMonitorEngine({
+    env: environment(styles, { UPCOMING_INTERVAL_SECONDS: '90' }),
+    state: stateWith(3), now: () => timestamp,
+  });
+  assert.equal(configuredSlower.nextAlarmAt(), timestamp + 90000);
+
+  const normalOnly = createMonitorEngine({
+    env: environment([styles[3]]), state: stateWith(3), now: () => timestamp,
+  });
+  assert.equal(normalOnly.nextAlarmAt(), timestamp + 120000);
+});
+
+test('unknown upcoming priority expires four hours after its first observation across rehydration', async () => {
+  const startedAt = Date.now();
+  let timestamp = startedAt;
+  const env = environment();
+  const unknownUpcomingPage = () => productPage(TARGET, ['27'], {
+    featuredAttributes: ['COMING_SOON'], launchDate: null,
+  });
+  let engine = createMonitorEngine({ env, state: cache(timestamp), now: () => timestamp,
+    fetchImpl: async () => unknownUpcomingPage() });
+  await engine.tick();
+  assert.equal(engine.snapshot().knownProducts[TARGET].unknownUpcomingStartedAt, iso(startedAt));
+  assert.equal(engine.nextAlarmAt(), startedAt + 30000);
+
+  timestamp = startedAt + 238 * 60000;
+  engine = createMonitorEngine({ env, state: engine.snapshot(), now: () => timestamp,
+    fetchImpl: async () => unknownUpcomingPage() });
+  await engine.tick();
+  assert.equal(engine.snapshot().knownProducts[TARGET].unknownUpcomingStartedAt, iso(startedAt));
+  assert.equal(engine.nextAlarmAt(), timestamp + 30000);
+
+  timestamp = startedAt + 4 * 3600000;
+  engine = createMonitorEngine({ env, state: engine.snapshot(), now: () => timestamp,
+    fetchImpl: async () => unknownUpcomingPage() });
+  await engine.tick();
+  assert.equal(engine.snapshot().knownProducts[TARGET].unknownUpcomingStartedAt, iso(startedAt));
+  assert.equal(engine.nextAlarmAt(), timestamp + 120000);
+});
+
+test('a later known release replaces the unknown timer and uses the release window', async () => {
+  const startedAt = Date.now();
+  let timestamp = startedAt;
+  const releaseAt = startedAt + 10 * 3600000;
+  const env = environment([TARGET], { DISCOVERY_INTERVAL_HOURS: '168' });
+  let known = false;
+  const page = () => productPage(TARGET, ['27'], {
+    featuredAttributes: ['COMING_SOON'], launchDate: known ? iso(releaseAt) : null,
+  });
+  let state = cache(timestamp);
+  let engine = createMonitorEngine({ env, state, now: () => timestamp, fetchImpl: async () => page() });
+  await engine.tick();
+  state = engine.snapshot();
+  assert.equal(state.knownProducts[TARGET].unknownUpcomingStartedAt, iso(startedAt));
+
+  known = true;
+  timestamp = startedAt + 3600000;
+  engine = createMonitorEngine({ env, state, now: () => timestamp, fetchImpl: async () => page() });
+  await engine.tick();
+  state = engine.snapshot();
+  assert.equal(state.knownProducts[TARGET].unknownUpcomingStartedAt, null);
+  assert.equal(state.knownProducts[TARGET].upcomingReleaseAt, iso(releaseAt));
+  assert.equal(engine.nextAlarmAt(), timestamp + 120000);
+
+  timestamp = releaseAt - 180 * 60000;
+  engine = createMonitorEngine({ env, state, now: () => timestamp, fetchImpl: async () => page() });
+  await engine.tick();
+  assert.equal(engine.nextAlarmAt(), timestamp + 30000);
+});
+
 test('two independent product failures trigger persisted fleet backoff', async () => {
   let timestamp = Date.now();
   let requests = 0;

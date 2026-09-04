@@ -44,6 +44,8 @@ const MAX_EVENTS = 80;
 const MAX_HISTORY = 300;
 const MAX_CHECK_SAMPLES = 10000;
 const MAX_CATALOG_REPROBE_FAILURES = 3;
+const CROWDED_UPCOMING_THRESHOLD = 3;
+const CROWDED_UPCOMING_INTERVAL_SECONDS = 60;
 
 /** One persisted alarm step. The caller owns alarm registration and enable/stop controls. */
 export function createMonitorEngine({
@@ -522,6 +524,7 @@ export function createMonitorEngine({
       lastCatalogSeenAt: null,
       catalogReprobePending: false,
       upcomingReleaseAt: null,
+      unknownUpcomingStartedAt: null,
       stockHistory: [],
       lastResult: null,
     };
@@ -568,6 +571,7 @@ export function createMonitorEngine({
           catalogReprobeFailures: Math.max(0, Number(product.catalogReprobeFailures) || 0),
           urlRepairPending: product.urlRepairPending === true || repair.detected,
           upcomingReleaseAt: product.upcomingReleaseAt || null,
+          unknownUpcomingStartedAt: product.unknownUpcomingStartedAt || null,
           stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],
           lastResult: product.lastResult || null,
           lastRuntimeError: product.lastRuntimeError || null,
@@ -609,11 +613,13 @@ export function createMonitorEngine({
     if (millisecondsUntilFailureBackoff(state.failureBackoffUntil, now) > 0) {
       return [];
     }
-    return monitorableProducts()
+    const products = monitorableProducts();
+    const schedule = schedulingOptions(now, products);
+    return products
       .filter((entry) => shouldCheckProductNow(entry, {
-        ...schedulingOptions(now),
+        ...schedule,
       }))
-      .map((entry) => ({ entry, dueAt: productDueAt(entry, now) }))
+      .map((entry) => ({ entry, dueAt: productDueAt(entry, now, schedule) }))
       .sort((a, b) => {
         const overdue = a.dueAt - b.dueAt;
         const priority = Number(isUpcomingPriority(b.entry, now, config.upcomingWindowMinutes))
@@ -623,7 +629,7 @@ export function createMonitorEngine({
       .map(({ entry }) => entry);
   }
 
-  function productDueAt(entry, now) {
+  function productDueAt(entry, now, schedule = schedulingOptions(now)) {
     const lastChecked = Date.parse(entry.lastSeenAt || '');
     if (!Number.isFinite(lastChecked)) return Number.NEGATIVE_INFINITY;
     // Read the current policy interval from a fresh observation, before its overdue
@@ -631,14 +637,15 @@ export function createMonitorEngine({
     // launches from starving older normal checks in this one-product alarm model.
     const interval = millisecondsUntilProductDue({
       ...entry, lastSeenAt: new Date(now).toISOString(),
-    }, schedulingOptions(now));
+    }, schedule);
     return lastChecked + interval;
   }
 
   function nextScheduledWaitMs(now = clock()) {
     const products = monitorableProducts();
     if (!products.length) return Number.POSITIVE_INFINITY;
-    return Math.min(...products.map((entry) => millisecondsUntilProductDue(entry, schedulingOptions(now))));
+    const schedule = schedulingOptions(now, products);
+    return Math.min(...products.map((entry) => millisecondsUntilProductDue(entry, schedule)));
   }
 
   function nextEffectiveWaitMs(now = clock()) {
@@ -648,11 +655,16 @@ export function createMonitorEngine({
     );
   }
 
-  function schedulingOptions(now) {
+  function schedulingOptions(now, products = monitorableProducts()) {
+    const upcomingCount = products.filter((entry) =>
+      !entry.pausedAt && !entry.catalogReprobePending &&
+      isUpcomingPriority(entry, now, config.upcomingWindowMinutes)).length;
     return {
       now,
       normalIntervalSeconds: config.intervalSeconds,
-      upcomingIntervalSeconds: config.upcomingIntervalSeconds,
+      upcomingIntervalSeconds: upcomingCount >= CROWDED_UPCOMING_THRESHOLD
+        ? Math.max(config.upcomingIntervalSeconds, CROWDED_UPCOMING_INTERVAL_SECONDS)
+        : config.upcomingIntervalSeconds,
       upcomingWindowMinutes: config.upcomingWindowMinutes,
       pausedRecheckHours: config.pausedRecheckHours,
     };

@@ -74,7 +74,7 @@
 
 ## C. PLAUSIBLE(判定が1対1で割れた・修正は任意)
 
-1. `src/monitor-policy.js:180` 発売日不明の coming-soon 商品が無期限に30秒間隔ポーリング。反対意見: テストと README がこの挙動を意図として明示しており設計判断。歯止め(上限日数など)を入れるかは運用判断。
+1. 【解消済み】発売日不明の coming-soon 商品は初回観測から4時間だけ優先し、その後は通常間隔へ戻す。発売前対象が同時に3件以上なら60秒へ緩和する境界テストも追加済み。
 2. `scripts/check-health.js:10` DISCORD_WEBHOOK 不正/未設定時に watchdog が無警告でサイレント無効化。反対意見: ログには出る・monitor側 validateWebhook と対称にするだけの小改善。console.warn 追加程度が妥当。
 
 ## 良かった点(検証済み)

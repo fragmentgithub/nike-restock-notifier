@@ -303,10 +303,13 @@ export function shouldChainNextRun({
     dueMinutes <= chainWindowMinutes;
 }
 
+const UNKNOWN_UPCOMING_WINDOW_MS = 4 * 60 * 60 * 1000;
+
 export function updateUpcomingState(entry, result, { now = Date.now() } = {}) {
   const observedReleaseAt = Date.parse(result?.releaseAt || '');
   if (result?.availabilityState === 'coming-soon' && Number.isFinite(observedReleaseAt)) {
     entry.upcomingReleaseAt = new Date(observedReleaseAt).toISOString();
+    entry.unknownUpcomingStartedAt = null;
   } else if (!entry.upcomingReleaseAt && entry?.lastResult?.availabilityState === 'coming-soon') {
     const previousReleaseAt = Date.parse(entry.lastResult.releaseAt || '');
     if (Number.isFinite(previousReleaseAt)) {
@@ -318,13 +321,34 @@ export function updateUpcomingState(entry, result, { now = Date.now() } = {}) {
   if (Number.isFinite(rememberedReleaseAt) && now > rememberedReleaseAt + 60 * 60 * 1000) {
     entry.upcomingReleaseAt = null;
   }
+
+  if (result?.availabilityState === 'coming-soon' && !Number.isFinite(observedReleaseAt) &&
+      !Number.isFinite(Date.parse(entry.upcomingReleaseAt || ''))) {
+    const existingStartedAt = Date.parse(entry.unknownUpcomingStartedAt || '');
+    const previousWasUnknownUpcoming = entry?.lastResult?.availabilityState === 'coming-soon' &&
+      !Number.isFinite(Date.parse(entry.lastResult.releaseAt || ''));
+    const legacyStartedAt = previousWasUnknownUpcoming ? Date.parse(entry.lastSeenAt || '') : Number.NaN;
+    if (!Number.isFinite(existingStartedAt) ||
+        (!previousWasUnknownUpcoming && now >= existingStartedAt + UNKNOWN_UPCOMING_WINDOW_MS)) {
+      entry.unknownUpcomingStartedAt = new Date(
+        Number.isFinite(legacyStartedAt) ? legacyStartedAt : now,
+      ).toISOString();
+    }
+  }
   return entry.upcomingReleaseAt || null;
 }
 
 export function isUpcomingPriority(entry, now = Date.now(), upcomingWindowMinutes = 180) {
   const currentlyComingSoon = entry?.lastResult?.availabilityState === 'coming-soon';
   const releaseAt = Date.parse(entry?.lastResult?.releaseAt || entry?.upcomingReleaseAt || '');
-  if (!Number.isFinite(releaseAt)) return currentlyComingSoon;
+  if (!Number.isFinite(releaseAt)) {
+    if (!currentlyComingSoon) return false;
+    const rememberedStart = Date.parse(entry?.unknownUpcomingStartedAt || '');
+    const legacyStart = currentlyComingSoon ? Date.parse(entry?.lastSeenAt || '') : Number.NaN;
+    const startedAt = Number.isFinite(rememberedStart) ? rememberedStart : legacyStart;
+    return Number.isFinite(startedAt) && now >= startedAt &&
+      now < startedAt + UNKNOWN_UPCOMING_WINDOW_MS;
+  }
   const windowMs = Math.max(1, Number(upcomingWindowMinutes) || 180) * 60 * 1000;
   return releaseAt >= now - 60 * 60 * 1000 && releaseAt <= now + windowMs;
 }

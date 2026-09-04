@@ -113,7 +113,7 @@ node scripts/cloudflare-admin.js mode active
 
 DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` を維持し、同じDurable Objectの状態を使います。通常確認時の保存回数を減らし、起動時の全履歴再保存は廃止しました。通知候補の確定など、必要な保存は維持します。
 
-通常は `INTERVAL_SECONDS`、発売前は `UPCOMING_INTERVAL_SECONDS` に基づくalarmで確認します。5分ごとのCronはalarm消失時の復旧用です。取得失敗が複数商品で続く場合はアクセス間隔を最大10分まで延ばします。カタログ再検査が3回連続で失敗した休止商品は、`PAUSED_RECHECK_HOURS`（既定24時間）での確認へ戻ります。
+通常は `INTERVAL_SECONDS`、発売前は `UPCOMING_INTERVAL_SECONDS` に基づくalarmで確認します。発売前対象が同時に3件以上ある場合、その対象の間隔には60秒の下限を適用します。発売日時がない `coming-soon` は初回観測時刻を状態へ保存し、4時間後に通常間隔へ戻します。5分ごとのCronはalarm消失時の復旧用です。取得失敗が複数商品で続く場合はアクセス間隔を最大10分まで延ばします。カタログ再検査が3回連続で失敗した休止商品は、`PAUSED_RECHECK_HOURS`（既定24時間）での確認へ戻ります。
 
 在庫が不明な観測では、通知済みキーと在庫履歴を保全します。通知先への送信とローカル状態の保存は単一の取引にできないため、送信成功直後の障害などでは重複する余地があります。デプロイ成功だけで監視成功と判断せず、認証付きhealthと商品取得時刻を確認してください。
 
@@ -128,7 +128,7 @@ npm run viewer:build
 npm run cloudflare:test
 ```
 
-今回の変更は285テストと実Workerdの認証・service binding・SQL集計・別DOバックアップ復元検証を通過しています。実Workerd検証では、本番の秘密値を使わず外部通信を遮断します。
+今回の変更は289テストと実Workerdの認証・service binding・SQL集計・別DOバックアップ復元検証を通過しています。実Workerd検証では、本番の秘密値を使わず外部通信を遮断します。
 
 監視側の構成は `wrangler.jsonc`、閲覧側は `wrangler.viewer.jsonc` です。反映前に非公開の監視状態バックアップと長期集計を保存し、監視側の読み取り用エントリーポイントを先に反映してから閲覧側を反映します。Accessポリシー・audience・本人メールのSecret設定を維持してください。反映後は本人以外の拒否、本人の閲覧、運転モード・通知済みキー・短期履歴・長期集計の保持、自動確認の継続を確認します。
 
