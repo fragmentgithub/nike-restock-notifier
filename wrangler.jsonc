@@ -8,9 +8,15 @@
   "workers_dev": true,
   "preview_urls": false,
   "durable_objects": {
-    "bindings": [{ "name": "MONITOR", "class_name": "NikeMonitor" }]
+    "bindings": [
+      { "name": "MONITOR", "class_name": "NikeMonitor" },
+      { "name": "BACKUPS", "class_name": "NikeBackup" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NikeMonitor"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["NikeMonitor"] },
+    { "tag": "v2", "new_sqlite_classes": ["NikeBackup"] }
+  ],
   "triggers": { "crons": ["*/5 * * * *"] },
   "observability": { "enabled": true, "head_sampling_rate": 1 }
 }

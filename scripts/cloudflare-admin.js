@@ -6,8 +6,8 @@ const base = new URL(process.env.CLOUDFLARE_MONITOR_URL || DEFAULT_URL);
 if (base.protocol !== 'https:' || base.username || base.password) throw new Error('An HTTPS Worker URL is required');
 const token = String(process.env.ADMIN_TOKEN || await readFile('.cloudflare-migration/admin-token', 'utf8')).trim();
 if (!token) throw new Error('ADMIN_TOKEN is required');
-const routes = { health: 'health', status: 'status', trends: 'trends', state: 'state', mode: 'mode', probe: 'probe', import: 'import', credential: 'migration-credential', 'clear-credential': 'migration-credential' };
-if (!routes[command]) throw new Error('Use health, state, mode, probe, or import');
+const routes = { health: 'health', status: 'status', trends: 'trends', state: 'state', mode: 'mode', probe: 'probe', import: 'import', backup: 'backup', backups: 'backup', restore: 'restore', credential: 'migration-credential', 'clear-credential': 'migration-credential' };
+if (!routes[command]) throw new Error('Use health, status, trends, state, mode, probe, import, backup, backups, or restore');
 let payload;
 if (command === 'mode') {
   if (!['paused', 'shadow', 'active'].includes(argument)) throw new Error('Mode must be paused, shadow, or active');
@@ -23,6 +23,11 @@ if (command === 'import') {
   const vars = JSON.parse(await readFile(`${argument}/variables.json`, 'utf8'));
   const metadata = JSON.parse(await readFile(`${argument}/metadata.json`, 'utf8'));
   payload = { state, vars, migrationId: String(metadata.runId || metadata.exportedAt || metadata.createdAt || '') };
+}
+if (command === 'backup') payload = {};
+if (command === 'restore') {
+  if (!argument) throw new Error('Provide the backup generation to restore');
+  payload = { generation: argument };
 }
 const requestUrl = new URL(`/admin/${routes[command]}`, base);
 if (command === 'clear-credential') {
@@ -44,8 +49,8 @@ if (command === 'credential') {
   if (!argument) throw new Error('Encrypted credential export requires an output file path');
   await writeFile(argument, Buffer.from(result.encryptedWebhook, 'base64'));
   console.log('Encrypted migration credential downloaded.');
-} else if (command === 'state' || command === 'status' || command === 'trends') {
-  if (!argument) throw new Error('State export requires an output file path');
+} else if (command === 'state' || command === 'status' || command === 'trends' || command === 'backups') {
+  if (!argument) throw new Error('Provide an output file path');
   await writeFile(argument, JSON.stringify(result, null, 2));
   console.log('Private monitor state exported.');
 } else if (outputPath) {

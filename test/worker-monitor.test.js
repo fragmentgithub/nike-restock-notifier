@@ -84,3 +84,23 @@ test('an alarm firing during a long check leaves a recovery alarm without starti
   assert.equal(ticks, 1);
   assert.equal(storage.alarmTime, now + 30000);
 });
+
+test('the cron backup guard creates at most one automatic generation per UTC day', async (t) => {
+  let now = NOW;
+  const { controller } = fixture(t, { now: () => now });
+  let latest = null;
+  let creates = 0;
+  controller.backup = {
+    latest: async () => latest,
+    createDaily: async () => {
+      creates += 1;
+      latest = { generation: `generation-${creates}`, createdAt: new Date(now).toISOString() };
+      return latest;
+    },
+  };
+  assert.equal((await controller.ensureBackedUp()).created, true);
+  assert.equal((await controller.ensureBackedUp()).created, false);
+  now += 86400000;
+  assert.equal((await controller.ensureBackedUp()).created, true);
+  assert.equal(creates, 2);
+});

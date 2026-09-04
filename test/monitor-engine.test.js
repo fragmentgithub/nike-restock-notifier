@@ -457,13 +457,17 @@ test('a normal unchanged stock check commits its observation and scheduling once
   const saves = [];
   const engine = createMonitorEngine({ env: environment(), state: cache(timestamp, { lastStockKey: '27' }),
     now: () => timestamp, fetchImpl: async () => productPage(),
-    persist: async (state, status) => saves.push({ state, status }),
+    persist: async (state, status, metadata) => saves.push({ state, status, metadata }),
   });
   await engine.tick();
   assert.equal(saves.length, 1);
   assert.equal(saves[0].state.lastTickAt, iso(timestamp));
   assert.equal(saves[0].status.metrics.checks, 1);
   assert.equal(saves[0].status.nextCheckAt, iso(timestamp + 120000));
+  assert.deepEqual(saves[0].metadata.observation, {
+    styleColor: TARGET, observedAt: iso(timestamp), availability: 'in_stock', expectedIntervalSeconds: 120,
+    restockDetected: false,
+  });
 });
 
 test('a notification keeps its pending commit before the send and its acknowledgment afterward', async () => {
@@ -478,10 +482,12 @@ test('a notification keeps its pending commit before the send and its acknowledg
       }
       return productPage();
     },
-    persist: async (state) => {
+    persist: async (state, _status, metadata) => {
       const entry = state.knownProducts[TARGET];
       steps.push(entry.lastStockKey === '27' ? 'acknowledged' : 'pending');
       assert.equal(Boolean(entry.pendingNotification), entry.lastStockKey !== '27');
+      if (entry.lastStockKey !== '27') assert.equal(metadata.observation.availability, 'in_stock');
+      else assert.deepEqual(metadata, {});
     },
   });
   assert.equal((await engine.tick()).notified, true);

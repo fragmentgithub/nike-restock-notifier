@@ -121,6 +121,7 @@ export function createMonitorEngine({
   delete state.lastStockKey;
 
   state.consecutiveFailedCycles = Math.max(0, Number(state.consecutiveFailedCycles) || 0);
+  let pendingObservation = null;
   return {
     tick,
     snapshot: () => structuredClone(state),
@@ -165,6 +166,7 @@ export function createMonitorEngine({
       recordCheckSample(applyRuntimeFailure(entry, safeError, {
         checkedAt, durationMs: clock() - startedAt,
       }));
+      pendingObservation = observationFor(entry, null, checkedAt, config.intervalSeconds, false);
       pushEvent({
         id: `worker-error-${clock()}-${entry.styleColor}`, type: 'error',
         message: `${entry.styleColor} の監視処理でエラー: ${safeError.message}`,
@@ -365,6 +367,10 @@ export function createMonitorEngine({
       ? null
       : { message: `${styleColor} を確認できませんでした。`, at: checkedAt };
     if (result.product?.url) entry.url = result.product.url;
+    pendingObservation = observationFor(
+      entry, result, checkedAt, config.intervalSeconds,
+      Boolean(stockTransition?.added?.length),
+    );
 
     pushEvent({
       id: `actions-${clock()}-${styleColor}`,
@@ -768,7 +774,12 @@ export function createMonitorEngine({
     state.updatedAt = updatedAt;
     const status = buildStatus(updatedAt);
     try {
-      await save(structuredClone(state), status);
+      const observation = pendingObservation;
+      await save(structuredClone(state), status, observation ? { observation } : {});
+      // Notification checkpoints and the final tick save can occur in one run.
+      // Only the first durable save records this observation; storage also keeps
+      // the product+instant identity idempotent across retries.
+      if (pendingObservation === observation) pendingObservation = null;
     } catch (error) {
       const failure = new Error('監視状態の保存に失敗しました。', { cause: error });
       failure.monitorPersistenceFailure = true;
@@ -952,6 +963,22 @@ export function createMonitorEngine({
     return Number.isFinite(timestamp) ? `<t:${Math.floor(timestamp / 1000)}:F>` : '不明';
   }
 
+}
+
+function observationFor(entry, result, observedAt, expectedIntervalSeconds, restockDetected) {
+  const base = {
+    styleColor: String(entry?.styleColor || result?.product?.styleColor || '').toUpperCase(),
+    observedAt,
+    expectedIntervalSeconds,
+    restockDetected: restockDetected === true,
+  };
+  if (!result?.ok || result.availabilityState === 'unknown') {
+    return { ...base, availability: 'unavailable' };
+  }
+  if (result.inStock) return { ...base, availability: 'in_stock' };
+  // OOS is confirmed by the same debounced transition state used for history.
+  // A single apparent OOS check contributes coverage but never closes an episode.
+  return { ...base, availability: entry?.lastObservedStockKey === '' ? 'out_of_stock' : 'indeterminate' };
 }
 
 function createBoundedFetch(fetchImpl, { maxBytes }) {

@@ -1,4 +1,5 @@
 import { RestockArchive } from './worker-trend-storage.js';
+import { TrendAnalytics } from './worker-trend-analytics.js';
 
 const CHUNK_CHARACTERS = 128000;
 const SAMPLE_TABLE_MARKER = 'cloudflare-samples-v1';
@@ -21,6 +22,7 @@ export class MonitorStorage {
     this.sampleGroups = null;
     this.documentChunks = new Map();
     this.trends = new RestockArchive(this.sql, { now });
+    this.analytics = new TrendAnalytics(this.sql, { now });
     this.trendMetadata = undefined;
   }
 
@@ -59,8 +61,12 @@ export class MonitorStorage {
   getTrends(options = {}) {
     const metadata = this.archiveMetadata();
     const day = Math.floor((this.trends.now() + 9 * 3600000) / 86400000);
-    if (!metadata || metadata.lastPrunedDay !== day) this.write({}, { initializeTrends: true });
-    return this.trends.summarize(this.trendMetadata, options);
+    if (!metadata || metadata.lastPrunedDay !== day || !this.analytics.exists()) {
+      this.write({}, { initializeTrends: true, initializeAnalytics: true });
+    }
+    const summary = this.trends.summarize(this.trendMetadata, options);
+    summary.analytics = this.analytics.summarize(options);
+    return summary;
   }
 
   samples() {
@@ -94,7 +100,10 @@ export class MonitorStorage {
     return this.sampleRows;
   }
 
-  write(documents, { initializeTrends = false } = {}) {
+  write(documents, {
+    initializeTrends = false, initializeAnalytics = false,
+    observation = null, analyticsBoundary = null,
+  } = {}) {
     // Serialize first: a bad value must not leave a partially replaced document.
     let nextSamples;
     const serialized = Object.entries(documents).map(([name, value]) => {
@@ -118,8 +127,11 @@ export class MonitorStorage {
       hasState ? documents.state : this.readDocument('state', {}),
       metadata, metadata ? null : this.readDocument('state', {}),
     ) : null;
+    const analyticsPlan = hasState || initializeAnalytics || observation || analyticsBoundary
+      ? this.analytics.prepare({ observation, boundary: analyticsBoundary }) : null;
     let nextMetadata;
     this.storage.transactionSync(() => {
+      if (analyticsPlan) this.analytics.apply(analyticsPlan);
       if (archivePlan) {
         nextMetadata = this.trends.apply(archivePlan);
         serialized.push(['trend-meta', JSON.stringify(nextMetadata)]);
@@ -206,8 +218,8 @@ export class MonitorStorage {
     return { blocks: next, groups: grouped };
   }
 
-  async commit(documents) {
-    this.write(documents);
+  async commit(documents, options = {}) {
+    this.write(documents, options);
     // Explicitly commit before a subsequent Discord request is allowed to start.
     await this.storage.sync();
   }

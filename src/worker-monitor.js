@@ -4,8 +4,10 @@ import { normalizeDiscordWebhook } from './discord.js';
 import { MONITOR_MODES, scrubOutput, selectConfig, validateImport, validateMigrationTransfer } from './worker-admin.js';
 import { boundedFetch } from './worker-network.js';
 import { probeNike } from './worker-probe.js';
+import { MonitorBackup } from './worker-backup.js';
 
 const RECOVERY_DELAY_MS = 120000;
+const BACKUP_GENERATION_PATTERN = /^\d{4}-\d{2}-\d{2}\/\d{8}T\d{9}-[0-9a-f-]{36}$/i;
 
 /** One personal monitor fleet; static page requests never enter this object. */
 export class MonitorController {
@@ -13,6 +15,9 @@ export class MonitorController {
     this.ctx = ctx;
     this.env = env;
     this.documents = new MonitorStorage(ctx.storage, { now });
+    this.backup = env.BACKUPS
+      ? new MonitorBackup(ctx.storage, env.BACKUPS.getByName('nike-jp-backups'), { now })
+      : null;
     this.engineFactory = engineFactory;
     this.probeNike = probe;
     this.now = now;
@@ -38,8 +43,11 @@ export class MonitorController {
       state,
       env: { ...selectConfig(control.vars), ...selectConfig(this.env), DISCORD_WEBHOOK: this.env.DISCORD_WEBHOOK || '' },
       notify: control.mode === 'active', now: this.now, fetchImpl: boundedFetch,
-      persist: async (nextState, status) => {
-        await this.documents.commit({ state: this.safe(nextState), status: this.safe(status) });
+      persist: async (nextState, status, metadata = {}) => {
+        await this.documents.commit(
+          { state: this.safe(nextState), status: this.safe(status) },
+          { observation: this.safe(metadata.observation) },
+        );
       },
     });
   }
@@ -161,7 +169,7 @@ export class MonitorController {
       await this.documents.commit({
         control: nextControl, state, status: this.safe(status),
         ...(credential ? { 'migration-credential': credential } : {}),
-      });
+      }, { analyticsBoundary: { at: new Date(this.now()).toISOString(), reason: 'imported' } });
       await this.ctx.storage.deleteAlarm();
       return {
         ok: true, mode: 'paused', imported: true, migrationId: nextControl.migrationId,
@@ -184,7 +192,12 @@ export class MonitorController {
       if (mode !== 'paused' && status.config?.productConfigError) {
         return failure(409, 'Correct the product configuration before starting monitoring.');
       }
-      await this.documents.commit({ control, state: engine.snapshot(), status: this.safe(status) });
+      await this.documents.commit(
+        { control, state: engine.snapshot(), status: this.safe(status) },
+        mode === 'paused'
+          ? { analyticsBoundary: { at: new Date(this.now()).toISOString(), reason: 'paused' } }
+          : {},
+      );
       if (mode === 'paused') await this.ctx.storage.deleteAlarm();
       else await this.scheduleNext(engine);
       return { ok: true, ...(await this.health()) };
@@ -245,6 +258,44 @@ export class MonitorController {
       const engine = this.engine(control);
       await this.scheduleNext(engine);
       return { repaired: true };
+    });
+  }
+
+  async ensureBackedUp() {
+    if (!this.backup) return { ok: false, disabled: true };
+    return this.exclusive(async () => {
+      const latest = await this.backup.latest();
+      const today = new Date(this.now()).toISOString().slice(0, 10);
+      if (latest?.createdAt?.slice(0, 10) === today) {
+        return { ok: true, created: false, latest };
+      }
+      return { ok: true, created: true, latest: await this.backup.createDaily() };
+    });
+  }
+
+  async backupNow() {
+    if (!this.backup) return failure(503, 'Backup storage is not configured.');
+    return this.exclusive(async () => ({ ok: true, ...(await this.backup.createDaily()) }));
+  }
+
+  async listBackups() {
+    if (!this.backup) return failure(503, 'Backup storage is not configured.');
+    return this.exclusive(async () => ({ ok: true, generations: await this.backup.list(30) }));
+  }
+
+  async restoreBackup(generation) {
+    if (!this.backup) return failure(503, 'Backup storage is not configured.');
+    if (typeof generation !== 'string' || !BACKUP_GENERATION_PATTERN.test(generation)) {
+      return failure(400, 'A valid backup generation is required.');
+    }
+    return this.exclusive(async () => {
+      if (this.control().mode !== 'paused') return failure(409, 'Pause the monitor before restoring a backup.');
+      const restored = await this.backup.restore(generation);
+      // Restore replaces SQLite rows under the storage wrapper, so discard its
+      // cached documents before any subsequent request reads state.
+      this.documents = new MonitorStorage(this.ctx.storage, { now: this.now });
+      await this.ctx.storage.deleteAlarm();
+      return { ok: true, ...restored };
     });
   }
 

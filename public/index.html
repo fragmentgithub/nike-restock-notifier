@@ -49,6 +49,38 @@
         <div class="trend-chart" id="trendChart" role="img" aria-label="入荷検出時刻のグラフを読み込み中" aria-describedby="trendNote"></div>
         <p class="hint" id="trendNote">同じ商品・同時刻の入荷検出を、サイズ数にかかわらず1件として集計。実際の補充時刻とはずれる場合があり、期間全体の記録や将来の入荷予測を示すものではありません。</p>
         <p class="hint" id="trendRetention">履歴は最大2年（730日）保存します。長期保存の開始時は残っていた履歴だけを取り込み、それ以前の欠けた履歴は復元できません。</p>
+        <div class="trend-analysis" aria-labelledby="analysisTitle">
+          <h3 id="analysisTitle">入荷傾向の分析</h3>
+          <div class="analysis-metrics">
+            <div>
+              <span>入荷検出から売り切れ確認まで</span>
+              <strong id="selloutEstimate">-</strong>
+              <small id="selloutDetail">データを読み込み中です。</small>
+            </div>
+            <div>
+              <span>最近30日の傾向</span>
+              <strong id="comparisonValue">-</strong>
+              <small id="comparisonDetail">データを読み込み中です。</small>
+            </div>
+            <div>
+              <span>監視できた量</span>
+              <strong id="coverageValue">-</strong>
+              <small id="coverageDetail">データを読み込み中です。</small>
+            </div>
+          </div>
+          <div class="heatmap-heading">
+            <h3>曜日 × 時間帯</h3>
+            <p>上段: 入荷検出件数 / 下段: 100商品時間あたり</p>
+          </div>
+          <div class="heatmap-scroll" tabindex="0" aria-label="曜日と時間帯別の入荷頻度表。横にスクロールできます。">
+            <table class="trend-heatmap" id="trendHeatmap">
+              <caption>曜日と時間帯別の入荷検出件数と、監視できた商品時間で補正した頻度</caption>
+              <thead id="trendHeatmapHead"></thead>
+              <tbody id="trendHeatmapBody"><tr><td>データを読み込み中です。</td></tr></tbody>
+            </table>
+          </div>
+          <p class="hint" id="analysisNote">監視時間を記録できなかった期間は補正せず「未観測」と表示します。少数の記録は傾向判断に適しません。</p>
+        </div>
       </section>
 
       <section class="layout">

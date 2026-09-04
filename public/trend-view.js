@@ -1,6 +1,7 @@
 const TREND_TIMEOUT_MS = 15000;
 const PERIODS = new Set(['all', '7', '30', '90', '365', '730']);
 const STYLE_COLOR_PATTERN = /^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/;
+const WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 
 export function createTrendView(root = document) {
   const product = root.querySelector('#trendProduct');
@@ -11,6 +12,15 @@ export function createTrendView(root = document) {
   const message = root.querySelector('#trendMessage');
   const chart = root.querySelector('#trendChart');
   const retention = root.querySelector('#trendRetention');
+  const selloutEstimate = root.querySelector('#selloutEstimate');
+  const selloutDetail = root.querySelector('#selloutDetail');
+  const comparisonValue = root.querySelector('#comparisonValue');
+  const comparisonDetail = root.querySelector('#comparisonDetail');
+  const coverageValue = root.querySelector('#coverageValue');
+  const coverageDetail = root.querySelector('#coverageDetail');
+  const heatmapHead = root.querySelector('#trendHeatmapHead');
+  const heatmapBody = root.querySelector('#trendHeatmapBody');
+  const analysisNote = root.querySelector('#analysisNote');
   const doc = chart.ownerDocument;
   const summaries = new Map();
   let monitorNotice = '';
@@ -19,6 +29,7 @@ export function createTrendView(root = document) {
   let controller = null;
   let loading = false;
   let loadError = '';
+  let renderedAnalytics;
 
   product.addEventListener('change', () => void refresh());
   period.addEventListener('change', () => void refresh());
@@ -131,6 +142,10 @@ export function createTrendView(root = document) {
       chart.setAttribute('aria-label', loading
         ? '選択中の条件の長期履歴を読み込み中です'
         : '選択中の条件の長期履歴を取得できないため、グラフを表示できません');
+      if (renderedAnalytics !== null) {
+        renderAnalytics(null);
+        renderedAnalytics = null;
+      }
       return;
     }
     const hours = [...summary.hours].sort((a, b) => a.hour - b.hour);
@@ -160,6 +175,10 @@ export function createTrendView(root = document) {
     if (summary.notes?.productsTruncated) remarks.push('商品数が多いため、選択肢の一部を省略しています。');
     message.textContent = remarks.join(' ');
     renderChart(hours, maxCount);
+    if (renderedAnalytics !== summary.analytics) {
+      renderAnalytics(summary.analytics);
+      renderedAnalytics = summary.analytics;
+    }
   }
 
   function renderChart(hours, maxCount) {
@@ -187,6 +206,139 @@ export function createTrendView(root = document) {
     chart.replaceChildren(fragment);
     chart.setAttribute('aria-label', `日本時間の入荷検出件数。${hours.map(({ hour, count }) => `${hour}時台${count}件`).join('、')}`);
   }
+
+  function renderAnalytics(analytics) {
+    if (!analytics) {
+      selloutEstimate.textContent = '-';
+      selloutDetail.textContent = '推定に必要な記録がありません。';
+      comparisonValue.textContent = '-';
+      comparisonDetail.textContent = '比較に必要な記録がありません。';
+      coverageValue.textContent = '-';
+      coverageDetail.textContent = '監視時間の記録がありません。';
+      analysisNote.textContent = '監視時間を記録できなかった期間は補正しません。分析データを取得できていません。';
+      emptyHeatmap('分析に必要な監視時間の記録がありません。');
+      return;
+    }
+    renderSellout(analytics.sellout);
+    renderComparison(analytics.comparison);
+    renderCoverage(analytics.coverage);
+    renderHeatmap(analytics.weekdayHours.cells, { truncated: analytics.coverage.segmentsTruncated === true });
+    renderAnalysisNote(analytics);
+  }
+
+  function renderSellout(sellout) {
+    if (sellout.samplesTruncated === true) {
+      selloutEstimate.textContent = '表示不可';
+      selloutDetail.textContent = '記録量が集計上限を超えたため、部分的な記録から所要時間を推定しません。';
+      return;
+    }
+    selloutEstimate.textContent = sellout.sampleCount > 0 && sellout.medianMinutes !== null
+      ? `約${formatDuration(sellout.medianMinutes)}` : 'データ不足';
+    const interval = sellout.medianLowerMinutes !== null && sellout.medianUpperMinutes !== null
+      ? `（観測幅 ${formatDuration(sellout.medianLowerMinutes)}〜${formatDuration(sellout.medianUpperMinutes)}）` : '';
+    selloutDetail.textContent = `確定した売り切れ ${sellout.sampleCount.toLocaleString('ja-JP')}件${interval}。` +
+      `追跡中・打ち切り ${sellout.censoredCount.toLocaleString('ja-JP')}件は推定から除外。`;
+  }
+
+  function renderComparison(comparison) {
+    const change = comparison.changePercent;
+    comparisonValue.textContent = comparison.status === 'insufficient' || change === null
+      ? 'データ不足'
+      : comparison.status === 'flat'
+        ? `ほぼ横ばい（${signedPercent(change)}）`
+        : `${comparison.status === 'up' ? '増加' : '減少'}（${signedPercent(change)}）`;
+    comparisonDetail.textContent = [
+      comparisonPeriod('最近30日', comparison.current),
+      comparisonPeriod('直前30日', comparison.previous),
+      comparison.status === 'insufficient'
+        ? `各期間${comparison.minSampleRequired.eventsPerPeriod}件以上かつ` +
+          `${formatNumber(comparison.minSampleRequired.observedProductHoursPerPeriod)}商品時間以上になるまで傾向を判定しません。` : '',
+    ].filter(Boolean).join(' / ');
+  }
+
+  function renderCoverage(coverage) {
+    coverageValue.textContent = coverage.segmentsTruncated === true
+      ? '補正不可'
+      : coverage.observedProductHours === null
+      ? '未観測' : `${formatNumber(coverage.observedProductHours)}商品時間`;
+    coverageDetail.textContent = coverage.segmentsTruncated === true
+      ? '記録量が集計上限を超えたため、商品監視時間と補正率を表示しません。'
+      : `${coverage.reliableSegments.toLocaleString('ja-JP')}区間を集計 / ` +
+        `${coverage.excludedGaps.toLocaleString('ja-JP')}区間を除外`;
+  }
+
+  function renderAnalysisNote(analytics) {
+    const limits = [];
+    if (analytics.coverage.segmentsTruncated === true) limits.push('補正率');
+    if (analytics.sellout.samplesTruncated === true) limits.push('売り切れまでの所要時間');
+    if (limits.length) {
+      analysisNote.textContent = `記録量が集計上限を超えたため、${limits.join('と')}は表示できません。部分集計から傾向を推測していません。`;
+      return;
+    }
+    const started = formatDate(analytics.coverage.recordingStartedAt);
+    analysisNote.textContent = `監視時間の記録は${started}からです。記録がない過去の期間は補完せず、` +
+      '未観測として頻度計算から除外します。入荷件数が少ない場合は傾向判断に適しません。';
+  }
+
+  function renderHeatmap(cells, { truncated = false } = {}) {
+    const lookup = new Map(cells.map((cell) => [`${cell.weekday}|${cell.hour}`, cell]));
+    const maxRate = Math.max(0, ...cells.map((cell) => cell.ratePer100ProductHours ?? 0));
+    const header = doc.createElement('tr');
+    const corner = doc.createElement('th');
+    corner.scope = 'col';
+    corner.textContent = '曜日';
+    header.append(corner);
+    for (let hour = 0; hour < 24; hour++) {
+      const cell = doc.createElement('th');
+      cell.scope = 'col';
+      cell.textContent = `${hour}時`;
+      header.append(cell);
+    }
+    heatmapHead.replaceChildren(header);
+    const rows = WEEKDAYS.map((weekday, weekdayIndex) => {
+      const row = doc.createElement('tr');
+      const label = doc.createElement('th');
+      label.scope = 'row';
+      label.textContent = weekday;
+      row.append(label);
+      for (let hour = 0; hour < 24; hour++) {
+        const data = lookup.get(`${weekdayIndex}|${hour}`);
+        const cell = doc.createElement('td');
+        const count = doc.createElement('span');
+        const rate = doc.createElement('small');
+        count.textContent = `${data.restockEvents}件`;
+        const observed = data.observedProductHours;
+        if (observed === null) {
+          cell.className = 'unobserved';
+          rate.textContent = truncated ? '補正不可' : '未観測';
+          cell.title = truncated
+            ? `${weekday}曜${hour}時台：入荷${data.restockEvents}件、集計上限超過のため補正不可`
+            : `${weekday}曜${hour}時台：入荷${data.restockEvents}件、監視時間の記録なし（補正不可）`;
+        } else {
+          const normalizedRate = data.ratePer100ProductHours;
+          const level = normalizedRate > 0 && maxRate > 0 ? Math.ceil((normalizedRate / maxRate) * 4) : 0;
+          cell.className = level ? `heat-${level}` : '';
+          rate.textContent = normalizedRate.toFixed(1);
+          cell.title = `${weekday}曜${hour}時台：入荷${data.restockEvents}件、` +
+            `観測${formatNumber(observed)}商品時間、100商品時間あたり${normalizedRate.toFixed(1)}件`;
+        }
+        cell.append(count, rate);
+        row.append(cell);
+      }
+      return row;
+    });
+    heatmapBody.replaceChildren(...rows);
+  }
+
+  function emptyHeatmap(text) {
+    heatmapHead.replaceChildren();
+    const row = doc.createElement('tr');
+    const cell = doc.createElement('td');
+    cell.colSpan = 25;
+    cell.textContent = text;
+    row.append(cell);
+    heatmapBody.replaceChildren(row);
+  }
 }
 
 function validateSummary(summary, filters) {
@@ -209,6 +361,87 @@ function validateSummary(summary, filters) {
   for (const date of [summary.period.retainedFrom, summary.period.retainedTo]) {
     if (date !== null && (typeof date !== 'string' || !Number.isFinite(Date.parse(date)))) invalid();
   }
+  if (summary.analytics !== undefined && !validAnalytics(summary.analytics)) invalid();
+}
+
+function validAnalytics(analytics) {
+  if (!analytics || !validCoverage(analytics.coverage) ||
+      !analytics.weekdayHours || !Array.isArray(analytics.weekdayHours.cells) ||
+      analytics.weekdayHours.cells.length !== 168 || !validSellout(analytics.sellout) ||
+      !validComparison(analytics.comparison)) return false;
+  const positions = new Set();
+  for (const cell of analytics.weekdayHours.cells) {
+    if (!cell || !Number.isInteger(cell.weekday) || cell.weekday < 0 || cell.weekday > 6 ||
+        !Number.isInteger(cell.hour) || cell.hour < 0 || cell.hour > 23 ||
+        !nonNegativeInteger(cell.restockEvents) || !validRatePair(cell) ||
+        positions.has(`${cell.weekday}|${cell.hour}`)) return false;
+    positions.add(`${cell.weekday}|${cell.hour}`);
+  }
+  return true;
+}
+
+function validCoverage(value) {
+  return value && typeof value.recordingStartedAt === 'string' &&
+    Number.isFinite(Date.parse(value.recordingStartedAt)) &&
+    nullableNonNegative(value.observedProductHours) && nonNegativeInteger(value.reliableSegments) &&
+    nonNegativeInteger(value.excludedGaps) && optionalBoolean(value.segmentsTruncated);
+}
+
+function validSellout(value) {
+  return value && nonNegativeInteger(value.sampleCount) && nonNegativeInteger(value.censoredCount) &&
+    ['medianMinutes', 'p25Minutes', 'p75Minutes', 'medianLowerMinutes', 'medianUpperMinutes']
+      .every((key) => nullableNonNegative(value[key])) && optionalBoolean(value.samplesTruncated);
+}
+
+function validComparison(value) {
+  return value && ['up', 'down', 'flat', 'insufficient'].includes(value.status) &&
+    value.minSampleRequired && nonNegativeInteger(value.minSampleRequired.eventsPerPeriod) &&
+    Number.isFinite(value.minSampleRequired.observedProductHoursPerPeriod) &&
+    value.minSampleRequired.observedProductHoursPerPeriod > 0 &&
+    (value.changePercent === null || Number.isFinite(value.changePercent)) &&
+    validComparisonPeriod(value.current) && validComparisonPeriod(value.previous);
+}
+
+function validComparisonPeriod(value) {
+  return value && nonNegativeInteger(value.events) && validRatePair(value);
+}
+
+function validRatePair(value) {
+  if (value.observedProductHours === null) return value.ratePer100ProductHours === null;
+  return Number.isFinite(value.observedProductHours) && value.observedProductHours > 0 &&
+    Number.isFinite(value.ratePer100ProductHours) && value.ratePer100ProductHours >= 0;
+}
+
+function nonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function nullableNonNegative(value) {
+  return value === null || Number.isFinite(value) && value >= 0;
+}
+
+function optionalBoolean(value) {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function comparisonPeriod(label, value) {
+  return `${label}: ${value.events.toLocaleString('ja-JP')}件、` +
+    (value.ratePer100ProductHours === null
+      ? '監視時間未観測' : `100商品時間あたり${value.ratePer100ProductHours.toFixed(1)}件`);
+}
+
+function signedPercent(value) {
+  return `${value > 0 ? '+' : ''}${value.toLocaleString('ja-JP', { maximumFractionDigits: 1 })}%`;
+}
+
+function formatNumber(value) {
+  return value.toLocaleString('ja-JP', { maximumFractionDigits: 1 });
+}
+
+function formatDuration(minutes) {
+  if (minutes < 60) return `${Math.round(minutes)}分`;
+  if (minutes < 1440) return `${(minutes / 60).toLocaleString('ja-JP', { maximumFractionDigits: 1 })}時間`;
+  return `${(minutes / 1440).toLocaleString('ja-JP', { maximumFractionDigits: 1 })}日`;
 }
 
 function formatDate(value) {

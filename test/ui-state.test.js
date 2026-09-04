@@ -85,6 +85,35 @@ function trendSummary(filters = { styleColor: 'all', days: 'all' }, {
   };
 }
 
+function analytics({ comparisonStatus = 'up' } = {}) {
+  const cells = [];
+  for (let weekday = 0; weekday < 7; weekday++) {
+    for (let hour = 0; hour < 24; hour++) {
+      cells.push({ weekday, hour, restockEvents: 0, observedProductHours: 10, ratePer100ProductHours: 0 });
+    }
+  }
+  Object.assign(cells.find((cell) => cell.weekday === 1 && cell.hour === 4), {
+    restockEvents: 2, observedProductHours: 20, ratePer100ProductHours: 10,
+  });
+  Object.assign(cells.find((cell) => cell.weekday === 2 && cell.hour === 3), {
+    restockEvents: 1, observedProductHours: null, ratePer100ProductHours: null,
+  });
+  return {
+    coverage: { recordingStartedAt: '2026-09-05T00:00:00Z', observedProductHours: 1680,
+      reliableSegments: 84, excludedGaps: 3 },
+    weekdayHours: { cells },
+    sellout: { sampleCount: 6, censoredCount: 2, medianMinutes: 90, p25Minutes: 45,
+      p75Minutes: 150, medianLowerMinutes: 75, medianUpperMinutes: 105 },
+    comparison: {
+      current: { events: 8, observedProductHours: 720, ratePer100ProductHours: 1.1 },
+      previous: { events: 4, observedProductHours: 680, ratePer100ProductHours: 0.6 },
+      changePercent: comparisonStatus === 'insufficient' ? null : 83.3,
+      status: comparisonStatus,
+      minSampleRequired: { eventsPerPeriod: 3, observedProductHoursPerPeriod: 24 },
+    },
+  };
+}
+
 async function loadApp(t, initialResponse, { trends = (filters) => trendSummary(filters) } = {}) {
   const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
   const doc = createDocument();
@@ -316,4 +345,116 @@ test('an expired product stays selected for its zero result and archive limits a
   assert.equal(app.node('trendTotal').textContent, '0件');
   assert.match(app.node('trendMessage').textContent, /選択肢の一部を省略/);
   assert.match(app.node('trendRetention').textContent, /保存件数の上限/);
+});
+
+test('analytics show corrected weekday rates, unobserved cells and sellout exclusions', async (t) => {
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: analytics() }),
+  });
+  assert.equal(app.node('selloutEstimate').textContent, '約1.5時間');
+  assert.match(app.node('selloutDetail').textContent, /確定した売り切れ 6件/);
+  assert.match(app.node('selloutDetail').textContent, /打ち切り 2件は推定から除外/);
+  assert.match(app.node('selloutDetail').textContent, /1.3時間〜1.8時間/);
+  assert.equal(app.node('comparisonValue').textContent, '増加（+83.3%）');
+  assert.match(app.node('comparisonDetail').textContent, /最近30日: 8件、100商品時間あたり1.1件/);
+  assert.equal(app.node('coverageValue').textContent, '1,680商品時間');
+  assert.match(app.node('coverageDetail').textContent, /84区間を集計 \/ 3区間を除外/);
+  assert.match(app.node('analysisNote').textContent, /補完せず、未観測/);
+  assert.equal(app.node('trendHeatmapHead').children[0].children.length, 25);
+  assert.equal(app.node('trendHeatmapBody').children.length, 7);
+  const observed = app.node('trendHeatmapBody').children[1].children[5];
+  assert.equal(observed.className, 'heat-4');
+  assert.equal(observed.children[0].textContent, '2件');
+  assert.equal(observed.children[1].textContent, '10.0');
+  assert.match(observed.title, /観測20商品時間/);
+  const unobserved = app.node('trendHeatmapBody').children[2].children[4];
+  assert.equal(unobserved.className, 'unobserved');
+  assert.equal(unobserved.children[0].textContent, '1件');
+  assert.equal(unobserved.children[1].textContent, '未観測');
+  assert.match(unobserved.title, /補正不可/);
+  const observedZero = app.node('trendHeatmapBody').children[0].children[1];
+  assert.equal(observedZero.children[0].textContent, '0件');
+  assert.equal(observedZero.children[1].textContent, '0.0');
+});
+
+test('insufficient comparisons and missing monitoring coverage are stated without a direction', async (t) => {
+  const insufficient = analytics({ comparisonStatus: 'insufficient' });
+  insufficient.coverage.observedProductHours = null;
+  insufficient.coverage.reliableSegments = 0;
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: insufficient }),
+  });
+  assert.equal(app.node('comparisonValue').textContent, 'データ不足');
+  assert.match(app.node('comparisonDetail').textContent, /各期間3件以上かつ24商品時間以上/);
+  assert.doesNotMatch(app.node('comparisonValue').textContent, /増加|減少|横ばい/);
+  assert.equal(app.node('coverageValue').textContent, '未観測');
+});
+
+test('malformed analytics keep the matching previous result and are never partly rendered', async (t) => {
+  const original = analytics();
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: original }),
+  });
+  assert.equal(app.node('selloutEstimate').textContent, '約1.5時間');
+  const malformed = structuredClone(original);
+  malformed.weekdayHours.cells.pop();
+  malformed.sellout.medianMinutes = 1;
+  app.setTrends((filters) => trendSummary(filters, { analytics: malformed }));
+  await app.refresh(state());
+  assert.equal(app.node('selloutEstimate').textContent, '約1.5時間');
+  assert.equal(app.node('trendHeatmapBody').children.length, 7);
+  assert.match(app.node('trendMessage').textContent, /前回取得した集計/);
+  assert.match(app.node('trendMessage').textContent, /応答形式が不正/);
+});
+
+test('changing to an uncached filter clears the previous analytics while it loads', async (t) => {
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: analytics() }),
+  });
+  const pending = Promise.withResolvers();
+  app.setTrends(() => pending.promise);
+  app.node('trendPeriod').change('90');
+  assert.equal(app.node('selloutEstimate').textContent, '-');
+  assert.equal(app.node('comparisonValue').textContent, '-');
+  assert.equal(app.node('trendHeatmapBody').children.length, 1);
+  assert.match(app.node('trendHeatmapBody').children[0].children[0].textContent, /記録がありません/);
+  pending.resolve(trendSummary({ styleColor: 'all', days: '90' }, { analytics: analytics() }));
+  await setImmediate();
+  assert.equal(app.node('selloutEstimate').textContent, '約1.5時間');
+  assert.equal(app.node('trendHeatmapBody').children.length, 7);
+});
+
+test('bounded analytics never present partial coverage rates or sellout durations as trends', async (t) => {
+  const bounded = analytics();
+  bounded.coverage.segmentsTruncated = true;
+  bounded.coverage.observedProductHours = null;
+  bounded.weekdayHours.cells.forEach((cell) => {
+    cell.observedProductHours = null;
+    cell.ratePer100ProductHours = null;
+  });
+  bounded.comparison.status = 'insufficient';
+  bounded.comparison.changePercent = null;
+  bounded.sellout.samplesTruncated = true;
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: bounded }),
+  });
+  assert.equal(app.node('coverageValue').textContent, '補正不可');
+  assert.match(app.node('coverageDetail').textContent, /集計上限を超えたため/);
+  assert.equal(app.node('selloutEstimate').textContent, '表示不可');
+  assert.match(app.node('selloutDetail').textContent, /部分的な記録から所要時間を推定しません/);
+  assert.equal(app.node('comparisonValue').textContent, 'データ不足');
+  assert.match(app.node('analysisNote').textContent, /補正率と売り切れまでの所要時間は表示できません/);
+  const firstCell = app.node('trendHeatmapBody').children[0].children[1];
+  assert.equal(firstCell.children[1].textContent, '補正不可');
+  assert.match(firstCell.title, /集計上限超過/);
+});
+
+test('analytics truncation markers must be booleans when present', async (t) => {
+  const malformed = analytics();
+  malformed.coverage.segmentsTruncated = 'false';
+  const app = await loadApp(t, state(), {
+    trends: (filters) => trendSummary(filters, { analytics: malformed }),
+  });
+  assert.equal(app.node('trendTotal').textContent, '-');
+  assert.match(app.node('trendMessage').textContent, /応答形式が不正/);
 });

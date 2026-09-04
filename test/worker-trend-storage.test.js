@@ -200,7 +200,7 @@ test('the bounded product selector does not truncate all-product event counts', 
   assert.equal(summary.distinctProducts, 1005);
   assert.equal(summary.products.length, 1000);
   assert.equal(summary.notes.productsTruncated, true);
-  assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 20000);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 65536);
 });
 
 test('one million retained events enforce the capacity bound by evicting only the oldest detection', async (t) => {

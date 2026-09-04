@@ -44,7 +44,8 @@ function fixture(t, { engineFactory, env = {}, probe } = {}) {
 test('all admin routes fail closed without the configured secret or with a wrong token', async () => {
   let calls = 0;
   const env = { MONITOR: { getByName: () => { calls++; } } };
-  for (const path of ['/admin/state', '/admin/health', '/admin/trends', '/admin/import', '/admin/mode', '/admin/probe', '/admin/migration-credential']) {
+  for (const path of ['/admin/state', '/admin/health', '/admin/trends', '/admin/import', '/admin/mode',
+    '/admin/probe', '/admin/backup', '/admin/restore', '/admin/migration-credential']) {
     assert.equal((await handleWorkerRequest(request(path), env)).status, 401);
     assert.equal((await handleWorkerRequest(request(path, { token: 'wrong' }), { ...env, ADMIN_TOKEN })).status, 401);
   }

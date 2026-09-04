@@ -4,7 +4,7 @@
 
 **ページは本人限定。Cloudflare上でPCがオフでも閲覧でき、長期リストックトレンドを確認する。** 過度な作り込みを避け、監視・通知ロジックの正確さと効率を優先する。一般公開画面・GitHub Pages・移転案内を復活させない。
 
-## 最新変更：本人限定Cloudflareページと長期トレンド
+## 最新変更：本人限定ページ、長期分析、別DOバックアップ
 
 閲覧URLは `https://nike-restock-viewer.only-this-moment.workers.dev`。Cloudflare Accessの本人メール限定ポリシーとメールOTPで認証する。本人の実メールアドレスをリポジトリに記載しない。PCを停止してもCloudflareの監視・保存・閲覧は継続する。
 
@@ -18,21 +18,37 @@
 
 最初の閲覧またはstate保存で、既存の全体最大300件・商品別最大60件の短期履歴を自動backfillする。最初がstate置換でも置換前の履歴を先に取り込む。保存開始前の全履歴が揃うわけではないため、返却の `period.archiveStartedAt` / `notes.retentionLabel` に実保存開始日と部分記録の注記を含める。保存期間や検出時刻は連続監視や実際の補充時刻を保証しない。
 
-現在の `state` exportは監視状態のみで、独立した長期archiveを含まない。`trends` 出力は集計結果であり個別イベントのバックアップではない。通常のstate importでは既存archiveを消さない。DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` を維持し、DOを作り直さない。
+分析は `src/worker-trend-analytics.js`。分析導入後の信頼できる観測から `monitor_product_coverage` と `monitor_sellout_episodes` を作る。旧入荷イベントの監視時間や売り切れ区間はbackfillしない。import、paused、長い空白、取得不能はboundaryとして区間を切る。
 
-263テスト成功。実Miniflare/WorkerdでAccessの本人/他人/未設定/偽装拒否、読み取り専用service binding、全6期間のSQL集計、getTrends前後の1万件サンプル・通知キー・短期履歴の一致を確認した。本番秘密値は使わず、外部通信は遮断している。100万件の保持上限とtransaction rollbackもNode SQLiteで検証済み。
+`getTrends` の `analytics` は次を返す。
+
+- `weekdayHours`: 曜日×24時間の入荷件数、観測商品時間、100商品時間あたり頻度。分母なしは `null`、観測済み0件は頻度0として区別する。
+- `sellout`: 完了区間の中央値・四分位・観測上下限と、途中で切れた打ち切り件数。打ち切りは所要時間から除外する。
+- `comparison`: 最近30日と直前30日の補正頻度。各期間3件・24商品時間を満たさなければ `insufficient` とし、増減を返さない。
+- `coverage`: 分析記録開始、実観測商品時間、信頼できる区間数、除外したgap数。旧履歴を都合よく補完しない。
+
+商品filterは全分析、days filterは `weekdayHours` / `sellout` / `coverage` に適用する。`comparison` だけはdaysに依存せず、選択商品の最近30日と直前30日を比較する。
+
+バックアップは `src/worker-backup.js`。監視DOとは別のSQLite DO `NikeBackup` へ日次世代を作り、最新30世代だけを残す。許可対象は `state` / `status` / `control` / `trend-meta` 文書、sample block、長期イベント、coverage、sellout episode、分析cursor/meta/gap。migration credential、`ADMIN_TOKEN`、`DISCORD_WEBHOOK`、Access資格情報は対象外。
+
+復元は `NikeMonitor` がpausedの場合だけ許可する。manifest・schema・chunk件数・連鎖hashをすべて検証し、一時tableへ展開してからpausedを再確認し、単一transactionで置換する。検証失敗時は現行DBを変更せず、成功後もstatus/controlをpaused、`nextCheckAt` をnullに固定する。現在の資格情報は置換しない。復元後は状態、通知済みキー、短期履歴、長期集計を確認してからshadow/activeへ進める。
+
+現在の手動 `state` exportは監視状態のみで、独立した長期archiveを含まない。`trends` 出力は集計結果であり個別イベントのバックアップではない。完全な保全は `NikeBackup` の日次世代を使う。通常のstate importでは既存archiveを消さない。DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` を維持し、追加migration `v2` は `NikeBackup` の作成だけに使う。バックアップDOの識別名 `nike-jp-backups` も維持し、どちらのDOも作り直さない。
+
+285テスト成功。実Miniflare/WorkerdでAccessの本人/他人/未設定/偽装拒否、読み取り専用service binding、全6期間のSQL集計、getTrends前後の1万件サンプル・通知キー・短期履歴の一致、別DOへの検証付きバックアップと復元を確認した。本番秘密値は使わず、外部通信は遮断している。100万件の保持上限とtransaction rollbackもNode SQLiteで検証済み。
 
 ### 最新デプロイの反映後確認
 
 | 項目 | 結果 |
 | --- | --- |
-| 監視Worker version | `bd8bfc88-cbc9-4662-a914-e38a26f81836` |
-| 閲覧Worker version | `757feccd-d645-4b4e-9fc5-876b27773bcf` |
-| 本人限定Access設定・本人以外の拒否 | 本人メールだけの許可ポリシー、HttpOnly・binding cookie設定を確認。未認証の `/`・`/app.js`・`/status.json`・`/api/trends`・`/admin/state` はすべてAccessログインへ302。 |
-| 本人ログイン後のページ・トレンド | 本人の実ログインは未確認。ブラウザー操作連携がブロックされたため、ユーザーへメールOTPでのログインを依頼中。ローカル画面では全履歴14件・4時台6件を確認。 |
-| active/通知キー/履歴/長期集計の保持・自動監視 | healthy/activeを維持。8商品の通知キーと商品別履歴、全体履歴28件が反映前後で完全一致。長期archiveは入荷14件。現行4商品の反映後の自動取得成功を確認。 |
+| 監視Worker version | `a839bcaf-8b22-4a45-b41c-c288fd8e8c06` |
+| 閲覧Worker version | `503286ff-70dd-42ff-b17d-8e59296ea3bd` |
+| 本人限定Access設定・本人以外の拒否 | 本人メールだけの許可ポリシーを維持。未認証の `/`・`/trend-view.js`・`/api/trends`・`/admin/state` はすべてAccessログインへ302。監視Workerの `/` は404、status/healthは401。 |
+| 本人ログイン後のページ・トレンド | 本人の実ログインは未確認。ローカル画面で全履歴14件、分析カード、曜日×時間帯168セル、データ不足表示を確認。 |
+| active/通知キー/履歴/長期集計の保持・自動監視 | healthy/activeを維持。8商品の通知キーと商品別履歴、全体履歴28件が反映前後で完全一致。長期archiveは入荷14件。現行4商品の反映後の自動取得成功、監視時間0.133商品時間・4区間の記録開始を確認。 |
+| 別DOバックアップ | 検証済み世代を2件作成。最新は8テーブル・35行で、分析coverageを含む。日次処理は同一UTC日には重複作成しない。 |
 
-長期保存開始は `2026-09-04T17:32:38.089Z`（日本時間2026-09-05 02:32:38.089）。監視Workerの未認証status・health・trendsは401を確認した。263テストと実Workerd検証も再実行して成功している。本人の認証済みブラウザー表示を確認するまでは、その項目だけ完了扱いにしない。
+長期保存開始は `2026-09-04T17:32:38.089Z`（日本時間2026-09-05 02:32:38.089）、補正分析開始は `2026-09-04T18:23:42.890Z`。旧14件は補正分析へ混ぜず、以後の実観測だけを使う。監視Workerの未認証status・health・trendsは401を確認した。285テストと実Workerd検証も再実行して成功している。本人の認証済みブラウザー表示を確認するまでは、その項目だけ完了扱いにしない。
 
 ## 前回の品質改善とデプロイ（2026-09-05、履歴）
 

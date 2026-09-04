@@ -352,6 +352,116 @@ a:focus-visible {
   line-height: 1.2;
 }
 
+.trend-analysis {
+  margin-top: 22px;
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+
+.analysis-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 18px;
+}
+
+.analysis-metrics > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.analysis-metrics span,
+.analysis-metrics small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.analysis-metrics strong {
+  display: block;
+  margin: 5px 0;
+  font-size: 15px;
+}
+
+.heatmap-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.heatmap-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.heatmap-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.heatmap-scroll:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.trend-heatmap {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 10px;
+}
+
+.trend-heatmap caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.trend-heatmap th,
+.trend-heatmap td {
+  min-width: 36px;
+  border: 1px solid #e4e1d8;
+  padding: 5px 2px;
+  text-align: center;
+}
+
+.trend-heatmap th {
+  background: #f5f4ef;
+  font-weight: 700;
+}
+
+.trend-heatmap tbody th {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+
+.trend-heatmap td span,
+.trend-heatmap td small {
+  display: block;
+  line-height: 1.25;
+}
+
+.trend-heatmap td small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.trend-heatmap td.heat-1 { background: #e8f3ec; }
+.trend-heatmap td.heat-2 { background: #cce5d5; }
+.trend-heatmap td.heat-3 { background: #93c7a7; }
+.trend-heatmap td.heat-4 { background: #54a274; color: #0c2d1d; }
+.trend-heatmap td.unobserved { background: #f1f0ec; color: var(--muted); }
+
 .stock-badge {
   display: inline-flex;
   align-items: center;
@@ -517,6 +627,10 @@ a:focus-visible {
   .trend-metrics {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .analysis-metrics {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
@@ -553,5 +667,10 @@ a:focus-visible {
   .trend-bar-count,
   .trend-hour-label {
     font-size: 10px;
+  }
+
+  .heatmap-heading {
+    align-items: start;
+    flex-direction: column;
   }
 }

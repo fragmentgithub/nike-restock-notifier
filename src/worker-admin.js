@@ -122,7 +122,8 @@ export async function handleWorkerRequest(request, env) {
       if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'Unauthorized' }, 401);
       const methods = {
         '/admin/state': 'GET', '/admin/status': 'GET', '/admin/health': 'GET', '/admin/trends': 'GET', '/admin/import': 'POST',
-        '/admin/mode': 'POST', '/admin/probe': 'POST',
+        '/admin/mode': 'POST', '/admin/probe': 'POST', '/admin/restore': 'POST',
+        '/admin/backup': ['GET', 'POST'],
         '/admin/migration-credential': ['GET', 'DELETE'],
       };
       if (!methods[path]) return json({ error: 'Not found' }, 404);
@@ -145,6 +146,10 @@ export async function handleWorkerRequest(request, env) {
         return json(await monitor.getTrends({ styleColor, days: days === 'all' ? days : Number(days) }));
       }
       if (path === '/admin/health') return json(await monitor.health());
+      if (path === '/admin/backup') {
+        const result = request.method === 'GET' ? await monitor.listBackups() : await monitor.backupNow();
+        return json(result, result?.ok === false ? result.status || 400 : 200);
+      }
       if (path === '/admin/migration-credential') {
         const result = request.method === 'GET'
           ? await monitor.migrationCredential()
@@ -160,6 +165,8 @@ export async function handleWorkerRequest(request, env) {
       } else if (path === '/admin/mode') {
         if (!MONITOR_MODES.has(payload?.mode)) return json({ error: 'Invalid monitor mode' }, 400);
         result = await monitor.setMode(payload.mode);
+      } else if (path === '/admin/restore') {
+        result = await monitor.restoreBackup(payload?.generation);
       } else {
         if (!['mind', 'fragment', 'catalog'].includes(payload?.target)) return json({ error: 'Invalid probe target' }, 400);
         result = await monitor.probe(payload.target);

@@ -42,6 +42,33 @@
 
 本番の長期保存開始は日本時間2026-09-05 02:32:38（UTC `2026-09-04T17:32:38.089Z`）です。反映時に入荷検出14件を引き継ぎました。この件数を以後の固定値として扱わないでください。
 
+## 分析の範囲と読み方
+
+分析用の監視時間と在庫区間は、分析機能を導入してからの信頼できる観測だけを記録します。長期archiveへ移行した以前の入荷イベントは24時間の単純な件数には残りますが、過去の監視時間を推測せず、曜日×時間帯の補正頻度、売り切れ時間、30日比較には使いません。import、`paused`、長い空白、在庫を判定できない取得は観測区間を切り、欠けた時間を分母へ加えません。
+
+商品選択はすべての分析へ適用します。期間選択は曜日×時間帯と売り切れ時間へ適用し、30日比較だけは選択期間にかかわらず最近30日と直前30日を比べます。
+
+- 曜日×時間帯は入荷検出件数と、実際に監視できた時間で補正した「100商品時間あたり」の頻度を併記します。分母がないセルは「未観測」で、観測済みの0件とは別です。
+- 入荷から売り切れまでの時間は、入荷検出前の最終観測、最後の在庫あり確認、最初の売り切れ確認から上下限を持つ区間として推定します。画面の代表値は完了した区間の中央値です。監視不能、長い空白、新しい入荷、停止などで完了しなかった区間は打ち切り件数に含め、時間の計算から除外します。
+- 最近30日と直前30日は、生の件数ではなく各期間の100商品時間あたり頻度を比較します。両期間がそれぞれ入荷3件以上かつ24商品時間以上になるまで、増減を判定せず「データ不足」とします。
+
+分析は傾向を整理するもので、次の入荷時刻や購入可能性を予測しません。
+
+## 日次バックアップと復元
+
+監視用 `NikeMonitor` とは別のSQLite Durable Object `NikeBackup` に、監視状態、通知済みキー、短期履歴、長期入荷archive、監視時間、除外したgap、売り切れ区間などの許可したテーブルを日次バックアップします。公開ステータスや手動の `state` exportだけに依存せず、最新30世代を保持します。
+
+`ADMIN_TOKEN`、`DISCORD_WEBHOOK`、Accessの設定、移行用暗号文などの資格情報はバックアップに含めません。復元しても、現在登録されている資格情報を上書きしません。
+
+復元は次の条件をすべて守ります。
+
+1. 監視を `paused` にし、進行中の商品確認と通知が終わったことを確認します。稼働中の復元要求は拒否されます。
+2. 対象世代のmanifest、table schema、全chunkの件数とhashを検証します。欠損・破損・schema不一致があれば現行データを変更しません。
+3. 検証済みデータを一時tableへ組み立て、停止状態を再確認してから、対象tableを1回のtransactionで置き換えます。
+4. 復元後も `paused` と次回確認未設定を維持します。状態・履歴・通知済みキー・長期集計を検証してから、必要に応じて `shadow`、最後に `active` へ戻します。
+
+バックアップ作成に失敗した場合は、直前の成功世代を最新として維持します。バックアップ先DOの削除や識別名の変更は復元可能性を失うため、通常の再デプロイで作り直さないでください。
+
 ## 秘密値と設定
 
 監視Workerの `ADMIN_TOKEN` と `DISCORD_WEBHOOK` はWorkers Secretです。ローカル操作ツールは `ADMIN_TOKEN` 環境変数、またはGit対象外の `.cloudflare-migration/admin-token` を読みます。
@@ -57,11 +84,20 @@ node scripts/cloudflare-admin.js health
 node scripts/cloudflare-admin.js status .cloudflare-migration/status-private.json
 node scripts/cloudflare-admin.js trends .cloudflare-migration/trends-private.json
 node scripts/cloudflare-admin.js state .cloudflare-migration/state-backup.json
+node scripts/cloudflare-admin.js backups .cloudflare-migration/backups-private.json
+node scripts/cloudflare-admin.js backup
 ```
 
 ステータスは閲覧用、`state` は通知済みキーなどを含む監視状態のバックアップです。監視状態の復元に閲覧用ステータスを使わないでください。
 
-現在の `state` exportには独立した長期archiveは含まれません。`trends` の出力も集計結果であり、個別イベントのバックアップではありません。通常のstate importでは同じDO内の長期archiveを消しませんが、DOの作り直し・削除・別の識別名への移行は保全手段になりません。
+現在の手動 `state` exportには独立した長期archiveは含まれません。`trends` の出力も集計結果であり、個別イベントのバックアップではありません。通常のstate importでは同じDO内の長期archiveを消しません。完全なCloudflare内保全には前節の `NikeBackup` を使います。
+
+復元する場合は世代一覧から対象を選び、監視を停止してから実行します。復元後も停止状態なので、内容を確認してから運転を再開します。
+
+```powershell
+node scripts/cloudflare-admin.js mode paused
+node scripts/cloudflare-admin.js restore "2026-09-05/世代ID"
+```
 
 運転モードを変更するときだけ、目的に合う操作を実行します。
 
@@ -92,7 +128,7 @@ npm run viewer:build
 npm run cloudflare:test
 ```
 
-今回の変更は263テストと実Workerdの認証・service binding・SQL集計検証を通過しています。実Workerd検証では、本番の秘密値を使わず外部通信を遮断します。
+今回の変更は285テストと実Workerdの認証・service binding・SQL集計・別DOバックアップ復元検証を通過しています。実Workerd検証では、本番の秘密値を使わず外部通信を遮断します。
 
 監視側の構成は `wrangler.jsonc`、閲覧側は `wrangler.viewer.jsonc` です。反映前に非公開の監視状態バックアップと長期集計を保存し、監視側の読み取り用エントリーポイントを先に反映してから閲覧側を反映します。Accessポリシー・audience・本人メールのSecret設定を維持してください。反映後は本人以外の拒否、本人の閲覧、運転モード・通知済みキー・短期履歴・長期集計の保持、自動確認の継続を確認します。
 

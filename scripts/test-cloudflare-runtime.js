@@ -39,7 +39,10 @@ const localOptions = convertV4MiniflareOptions({
     {
       name: monitorName, routes: ['monitor.test/*'], modules: true, script: bundle.outputFiles[0].text,
       compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
-      durableObjects: { MONITOR: { className: 'NikeMonitor', useSQLite: true } },
+      durableObjects: {
+        MONITOR: { className: 'NikeMonitor', useSQLite: true },
+        BACKUPS: { className: 'NikeBackup', useSQLite: true },
+      },
       bindings: { ADMIN_TOKEN: credential }, outboundService: offline,
     },
     ...viewers.map(({ name, access, bindings }) => ({
@@ -55,7 +58,8 @@ const localOptions = convertV4MiniflareOptions({
       script: `export default {
         async fetch(request, env) {
           const results = {};
-          for (const method of ['setMode', 'importState', 'exportState', 'alarm', 'probe']) {
+          for (const method of ['setMode', 'importState', 'exportState', 'alarm', 'probe',
+            'backupNow', 'listBackups', 'restoreBackup', 'ensureBackedUp']) {
             try { await env.MONITOR_VIEWER[method](); results[method] = { exposed: true }; }
             catch (error) { results[method] = { exposed: false, message: error.message }; }
           }
@@ -74,7 +78,7 @@ try {
   for (const pathname of ['/', '/index.html', '/app.js', '/styles.css', '/trend-view.js']) {
     assert.equal((await request(pathname)).status, 404, pathname);
   }
-  for (const pathname of ['/status.json', '/healthz', '/admin/state', '/admin/status']) {
+  for (const pathname of ['/status.json', '/healthz', '/admin/state', '/admin/status', '/admin/backup', '/admin/restore']) {
     assert.equal((await request(pathname)).status, 401, pathname);
   }
   const status = await request('/admin/status', { headers });
@@ -111,6 +115,36 @@ try {
   assert.deepEqual(restored.state.history, [transition]);
   assert.deepEqual(restored.state.knownProducts['HQ4307-005'].stockHistory, [transition]);
   assert.equal(JSON.stringify(restored).includes(credential), false);
+
+  // A real second SQLite Durable Object receives a validated snapshot. Restore
+  // replaces monitor rows atomically and the controller must discard its cache.
+  const backupResponse = await request('/admin/backup', {
+    method: 'POST', headers, body: '{}',
+  });
+  assert.equal(backupResponse.status, 200);
+  const backup = await backupResponse.json();
+  assert.equal(backup.ok, true);
+  assert.match(backup.generation, /^\d{4}-\d{2}-\d{2}\//);
+  const backupListResponse = await request('/admin/backup', { headers });
+  assert.equal(backupListResponse.status, 200);
+  const backupList = await backupListResponse.json();
+  assert.equal(backupList.generations[0].generation, backup.generation);
+  const invalidRestore = await request('/admin/restore', {
+    method: 'POST', headers, body: JSON.stringify({ generation: '../invalid' }),
+  });
+  assert.equal(invalidRestore.status, 400);
+  const replaced = await request('/admin/import', {
+    method: 'POST', headers,
+    body: JSON.stringify({ state: { knownProducts: {}, checkSamples: [], events: [], history: [] }, migrationId: 'local-runtime-replaced-state' }),
+  });
+  assert.equal(replaced.status, 200);
+  const restoreResponse = await request('/admin/restore', {
+    method: 'POST', headers, body: JSON.stringify({ generation: backup.generation }),
+  });
+  assert.equal(restoreResponse.status, 200);
+  assert.equal((await restoreResponse.json()).mode, 'paused');
+  const afterBackupRestore = await (await request('/admin/state', { headers })).json();
+  assert.deepEqual(afterBackupRestore.state, restored.state);
 
   // This is the platform's actual ctx.access implementation, not a unit-test
   // object. Every viewer has only the read-only named service binding.
@@ -172,7 +206,7 @@ try {
   });
   assert.equal(activate.status, 409, 'Live mode requires a configured Discord webhook');
   assert.equal(outgoing, 0, 'An isolated validation must not contact Nike or Discord');
-  console.log('Cloudflare runtime check passed: Access identity and audience, read-only viewer RPC, SQLite trends and 10,000 observations, preserved notification state, no external requests.');
+  console.log('Cloudflare runtime check passed: Access identity and audience, read-only viewer RPC, SQLite trends and 10,000 observations, separate verified backup/restore, preserved notification state, no external requests.');
 } finally {
   await runtime.dispose();
 }

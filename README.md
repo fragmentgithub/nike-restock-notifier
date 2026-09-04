@@ -9,6 +9,8 @@
 - WorkersとSQLite Durable Objectが監視状態・通知済み情報・履歴を保存します。
 - 閲覧用Workerは本人限定のCloudflare Access認証で保護し、監視Workerから読み取り専用の接続でデータを取得します。
 - 入荷検出の長期記録を短期履歴とは別に保存し、日本時間で集計します。
+- 分析導入後に実際に監視できた商品時間を記録し、入荷頻度・売り切れまでの時間・直近30日の変化を表示します。
+- 監視状態と履歴は別のSQLite Durable Objectへ日次バックアップし、最新30世代を保持します。
 - 通常は商品ごとに約2分、発売前は約30秒を目安に確認します。
 - 新商品を探索し、確認不能な商品を自動休止・再確認します。
 - GitHubにはソースコード・CI・認証付きのhealth確認を残します。
@@ -22,6 +24,10 @@
 グラフは入荷を検出した日本時間を24時間帯に集計し、商品別・直近7日・30日・90日・365日・730日・保存履歴全体で絞り込めます。同じ商品・同じ時刻の検出は、サイズ数にかかわらず1件です。記録は最大730日・100万件保持します。
 
 長期保存の開始時は、残っている全体履歴と商品別履歴を取り込みます。過去の全履歴が揃うわけではありません。保存開始日とこの制約をページに表示します。実際の補充時刻や将来の入荷確率を示すものではありません。
+
+分析は、分析機能を導入した後の観測だけを使います。以前から保存されていた入荷イベントに監視時間を推測して足すことはありません。曜日と時間帯の表は入荷検出件数と100商品時間あたりの頻度を併記し、監視時間がない場所を「未観測」、監視済みで入荷がなかった場所を0件として区別します。
+
+入荷から売り切れまでの表示は、最後に在庫を確認した時刻と最初に売り切れを確認した時刻による区間推定です。途中で監視できなくなった記録は打ち切りとして時間計算から除きます。最近30日と直前30日の比較も商品監視時間で補正し、各期間の入荷件数または監視時間が少なければ「データ不足」と表示します。
 
 従来の端末専用ページも利用できます。
 
@@ -38,9 +44,11 @@ node scripts/cloudflare-admin.js health
 node scripts/cloudflare-admin.js status .cloudflare-migration/status-private.json
 node scripts/cloudflare-admin.js trends .cloudflare-migration/trends-private.json
 node scripts/cloudflare-admin.js state .cloudflare-migration/state-backup.json
+node scripts/cloudflare-admin.js backups .cloudflare-migration/backups-private.json
+node scripts/cloudflare-admin.js backup
 ```
 
-`state` は監視状態のバックアップで、独立した長期アーカイブは含みません。`trends` は集計結果であり、個別イベントのバックアップではありません。通常の状態インポートは、同じDurable Objectの長期アーカイブを消しません。`public/status.json` はGit管理から除外し、旧 `pages.yml` と移転案内の生成処理は削除済みです。
+手動で取得する `state` は監視状態だけで、独立した長期アーカイブは含みません。`trends` は集計結果であり、個別イベントのバックアップではありません。これとは別に、Cloudflare上では監視状態・長期履歴・分析データ（除外した監視gapを含む）を `NikeBackup` のSQLite Durable Objectへ日次保存し、最新30世代を保持します。資格情報は保存しません。復元は監視を `paused` にした場合だけ許可され、全データの検証後に一括で置き換え、復元後も停止状態を維持します。世代一覧は `backups`、即時バックアップは `backup`、復元は停止後に `restore "世代名"` で実行できます。`public/status.json` はGit管理から除外し、旧 `pages.yml` と移転案内の生成処理は削除済みです。
 
 ## 今回のロジック改善
 
@@ -64,4 +72,4 @@ npm run viewer:build
 npm run cloudflare:test
 ```
 
-CIでも同じ確認を行います。`cloudflare:test` は隔離したCloudflare実行環境で、Access認証、読み取り専用の接続、長期SQL集計、SQLiteへの1万件の観測保存、通知済み情報の保持を検証します。本番キーを使わず、NikeやDiscordへの通信は行いません。今回の変更は263テストと実Workerdでの認証・接続検証を通過しています。
+CIでも同じ確認を行います。`cloudflare:test` は隔離したCloudflare実行環境で、Access認証、読み取り専用の接続、長期SQL集計、SQLiteへの1万件の観測保存、別DOへのバックアップと復元、通知済み情報の保持を検証します。本番キーを使わず、NikeやDiscordへの通信は行いません。今回の変更は285テストと実Workerdでの認証・接続検証を通過しています。
