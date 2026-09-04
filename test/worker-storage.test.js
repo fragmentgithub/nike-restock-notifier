@@ -87,6 +87,26 @@ test('sample order and duplicates survive an import that reorders existing recor
   assert.deepEqual(new MonitorStorage(storage).read('state').checkSamples, reordered);
 });
 
+test('a failed sample block load cannot turn a later read or save into a partial history', async (t) => {
+  const storage = durableStorageFor(t);
+  const original = { checkSamples: Array.from({ length: 129 }, (_, id) => ({ id })) };
+  await new MonitorStorage(storage).commit({ state: original });
+  const savedBlock = storage.sql.exec(
+    'SELECT value FROM monitor_sample_blocks WHERE block = ? AND part = ?', 1, 0,
+  ).toArray()[0].value;
+  storage.sql.exec('UPDATE monitor_sample_blocks SET value = ? WHERE block = ? AND part = ?', '{broken', 1, 0);
+  const documents = new MonitorStorage(storage);
+
+  assert.throws(() => documents.read('state'), SyntaxError);
+  assert.throws(() => documents.read('state'), SyntaxError);
+  await assert.rejects(documents.commit({ state: { checkSamples: [] } }), SyntaxError);
+  assert.equal(storage.sql.exec('SELECT COUNT(*) AS count FROM monitor_sample_blocks').toArray()[0].count, 2);
+
+  // A repaired block can be loaded on the same instance without losing neighbors.
+  storage.sql.exec('UPDATE monitor_sample_blocks SET value = ? WHERE block = ? AND part = ?', savedBlock, 1, 0);
+  assert.deepEqual(documents.read('state'), original);
+});
+
 test('state and public status roll back together if SQLite rejects a write', async (t) => {
   const storage = durableStorageFor(t);
   const documents = new MonitorStorage(storage);

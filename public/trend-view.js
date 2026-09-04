@@ -10,22 +10,22 @@ export function createTrendView(root = document) {
   const chart = root.querySelector('#trendChart');
   const doc = chart.ownerDocument;
   let lastState = null;
-  let stale = false;
+  let staleMessage = '';
   let productSignature = '';
 
   product.addEventListener('change', paint);
   period.addEventListener('change', paint);
 
   return {
-    render(state) {
+    render(state, { stale = false } = {}) {
       lastState = state;
-      stale = false;
+      staleMessage = stale ? 'ステータスの更新が遅延しています。最新の入荷が含まれていない可能性があります。' : '';
       product.disabled = false;
       period.disabled = false;
       paint();
     },
     unavailable({ preserveData = false } = {}) {
-      stale = true;
+      staleMessage = '最新履歴を取得できないため、前回取得した履歴を表示しています。';
       if (preserveData && lastState) {
         paint();
         return;
@@ -87,7 +87,7 @@ export function createTrendView(root = document) {
       : '履歴なし';
 
     const remarks = [];
-    if (stale) remarks.push('最新履歴を取得できないため、前回取得した履歴を表示しています。');
+    if (staleMessage) remarks.push(staleMessage);
     if (summary.totalEvents === 0) {
       remarks.push('この条件に該当する入荷検出の記録はありません。');
     } else if (summary.totalEvents < 10) {
@@ -95,7 +95,7 @@ export function createTrendView(root = document) {
     } else {
       remarks.push('棒の高さは、その時間帯に入荷を検出した件数です。');
     }
-    message.className = `trend-message${stale ? ' error' : ''}`;
+    message.className = `trend-message${staleMessage ? ' error' : ''}`;
     message.textContent = remarks.join(' ');
     renderChart(hours, maxCount);
   }
@@ -131,7 +131,7 @@ function formatDate(value) {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return '-';
   return new Intl.DateTimeFormat('ja-JP', {
-    timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit',
+    timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   }).format(date);
 }

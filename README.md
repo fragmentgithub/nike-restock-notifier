@@ -40,5 +40,19 @@ node scripts/cloudflare-admin.js status .cloudflare-migration/status-private.jso
 - SKU情報の欠落・未知状態では通知済み情報を保持し、誤った売切れ・再入荷判定を防ぎます。
 - カタログで再検出した休止商品が3回続けて確認できない場合は、通常の日次再確認へ戻します。
 - 商品ページの解析済みJSONを再利用し、同じ内容の二重解析を減らしました。
+- SNKRSの商品全体の売切れ表示を、残っているサイズ在庫情報より優先し、誤通知を防ぎます。
+- 履歴の一部が読み込めないとき、不完全な履歴を保存し直さないようにしました。
+- 古いステータスはトレンドにも遅延を表示し、取得失敗や在庫不明を現在の在庫ありと混同しません。
 
 運用・設定・保存上の制約は [CLOUDFLARE.md](CLOUDFLARE.md)、開発の引き継ぎは [HANDOFF.md](HANDOFF.md) を参照してください。
+
+## 変更時の検証
+
+```powershell
+npm ci
+npm test
+npm run cloudflare:build
+npm run cloudflare:test
+```
+
+CIでも同じ確認を行います。`cloudflare:test` は隔離したローカルのCloudflare実行環境で、非公開ルート、SQLiteへの1万件の観測履歴保存、通知済み情報の保持を検証します。本番キーを使わず、NikeやDiscordへの通信は行いません。

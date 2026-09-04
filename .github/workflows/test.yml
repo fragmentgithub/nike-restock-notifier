@@ -31,3 +31,6 @@ jobs:
 
       - name: Validate Cloudflare deployment
         run: npm run cloudflare:build
+
+      - name: Verify private Worker and SQLite state in the Cloudflare runtime
+        run: npm run cloudflare:test

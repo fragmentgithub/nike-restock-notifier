@@ -377,6 +377,35 @@ test('SNKRSの明示的なavailable falseは残ったHIGH表示より優先す�
   assert.equal(result.availabilityState, 'out-of-stock');
 });
 
+test('SNKRSの商品全体の売り切れ表示を残ったSKU在庫より優先する', async () => {
+  for (const unavailable of [
+    { launchStatus: 'SOLD_OUT' },
+    { merchStatus: 'UNAVAILABLE' },
+    { statusModifier: 'OUT_OF_STOCK_SEARCHABLE' },
+  ]) {
+    const result = await checkWithSnkrsData({
+      isActive: true,
+      skus: [snkrsSize('27', true, 'HIGH')],
+      ...unavailable,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.inStock, false, JSON.stringify(unavailable));
+    assert.equal(result.availabilityState, 'out-of-stock');
+    assert.deepEqual(result.availableSizes, []);
+    assert.deepEqual(result.matchingSizes, []);
+  }
+});
+
+test('SNKRSはNOT_YET_AVAILABLEを売り切れと誤読せず発売前として扱う', async () => {
+  const result = await checkWithSnkrsData({
+    launchStatus: 'NOT_YET_AVAILABLE',
+    merchStatus: 'UNAVAILABLE',
+    skus: [snkrsSize('27', true, 'HIGH')],
+  });
+  assert.equal(result.inStock, false);
+  assert.equal(result.availabilityState, 'coming-soon');
+});
+
 test('API在庫一覧の欠落を売り切れと混同しない', async () => {
   const result = await checkWithResponses([
     new Response('blocked', { status: 403 }),

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "check": "node --check scripts/monitor.js && node --check scripts/check-health.js && node --check scripts/recover-monitor.js && node --check scripts/serve-pages.js && node --check scripts/test-discord.js && node --check public/app.js && node --check src/worker.js && node --check scripts/cloudflare-admin.js && node --check scripts/import-cloudflare-webhook.js && node --check scripts/export-cloudflare-state.js",
+    "check": "node --check scripts/monitor.js && node --check scripts/check-health.js && node --check scripts/recover-monitor.js && node --check scripts/serve-pages.js && node --check scripts/test-discord.js && node --check public/app.js && node --check src/worker.js && node --check scripts/cloudflare-admin.js && node --check scripts/import-cloudflare-webhook.js && node --check scripts/export-cloudflare-state.js && node --check public/restock-trends.js && node --check public/trend-view.js && node --check scripts/test-cloudflare-runtime.js",
     "discord:test": "node scripts/test-discord.js",
     "health": "node scripts/check-health.js",
     "monitor": "node scripts/monitor.js",
@@ -13,13 +13,16 @@
     "cloudflare:build": "wrangler deploy --dry-run --outdir dist",
     "cloudflare:deploy": "wrangler deploy",
     "cloudflare:types": "wrangler types",
-    "cloudflare:admin": "node scripts/cloudflare-admin.js"
+    "cloudflare:admin": "node scripts/cloudflare-admin.js",
+    "cloudflare:test": "node scripts/test-cloudflare-runtime.js"
   },
   "engines": {
     "node": ">=24"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260904.1",
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260903.0-alpha",
     "wrangler": "^4.129.0"
   }
 }

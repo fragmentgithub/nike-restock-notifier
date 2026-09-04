@@ -443,15 +443,17 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
   const markers = [
     selectedProduct.launchStatus,
     selectedProduct.merchStatus,
+    selectedProduct.statusModifier,
+    ...asArray(selectedProduct.featuredAttributes),
     selectedThread?.active,
   ].join(' ');
   const comingSoon =
     (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) ||
     /COMING_SOON|NOTIFY_ME|NOT_YET_AVAILABLE|UPCOMING/i.test(markers);
-  const explicitlyInactive =
+  const explicitlyUnavailable =
     selectedProduct.isActive === false ||
-    /(?:^|\s)INACTIVE(?:\s|$)/i.test(markers);
-  const productAvailable = !comingSoon && !explicitlyInactive;
+    /(?:^|\s)INACTIVE(?:\s|$)|OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE/i.test(markers);
+  const productAvailable = !comingSoon && !explicitlyUnavailable;
   const sizes = asArray(selectedProduct.skus).map((sku) => {
     const level = String(sku?.level || '').toUpperCase();
     const availability = inventoryAvailability(sku?.available, level);
@@ -482,7 +484,7 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
   const availabilityState = comingSoon
     ? 'coming-soon'
-    : explicitlyInactive ? 'out-of-stock' : structuredAvailabilityState(sizes, matchingSizes);
+    : explicitlyUnavailable ? 'out-of-stock' : structuredAvailabilityState(sizes, matchingSizes);
   const title = firstPresent([
     coverCard.subtitle,
     selectedProduct.title,

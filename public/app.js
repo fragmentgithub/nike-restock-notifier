@@ -75,7 +75,7 @@ function render(state) {
   const results = products.map((item) => item.lastResult).filter(Boolean);
   const latestCheckedAt = latestDate(results.map((result) => result.checkedAt));
   const availableCount = products.filter((item) =>
-    item.settings?.enabled !== false && !item.pausedAt && item.lastResult?.inStock,
+    item.settings?.enabled !== false && !item.pausedAt && hasConfirmedStock(item),
   ).length;
   const monitorErrors = Array.isArray(state.errors)
     ? state.errors
@@ -129,9 +129,7 @@ function render(state) {
   availableProductCount.textContent = String(availableCount);
   lastChecked.textContent = latestCheckedAt
     ? formatDate(latestCheckedAt)
-    : state.updatedAt
-      ? formatDate(state.updatedAt)
-      : '-';
+    : '-';
   const monitorableCount = products.filter((item) => item.settings?.enabled !== false).length;
   nextCheck.textContent = paused
     ? '停止中'
@@ -147,19 +145,43 @@ function render(state) {
   renderQuality(state.metrics || {}, { stale });
   renderStockHistory(state.history || []);
   renderEvents(state.events || []);
-  trendView.render(state);
+  trendView.render(state, { stale });
 }
 
 function validateStatusPayload(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) {
     throw new Error('status.json の形式が不正です');
   }
-  if (!Number.isFinite(Date.parse(state.updatedAt || ''))) {
+  if (typeof state.updatedAt !== 'string' || !Number.isFinite(Date.parse(state.updatedAt))) {
     throw new Error('status.json に有効な更新時刻がありません');
   }
-  if (state.products !== undefined && !Array.isArray(state.products)) {
-    throw new Error('status.json の商品データ形式が不正です');
+  // Reject malformed collections before changing any part of the displayed
+  // snapshot, so a failed update leaves the complete last good view in place.
+  for (const key of ['products', 'history', 'events']) {
+    validateRecordList(state[key], key);
   }
+  for (const product of state.products || []) {
+    validateResult(product.lastResult);
+    validateRecordList(product.stockHistory, 'stockHistory');
+  }
+  validateResult(state.lastResult);
+}
+
+function validateRecordList(value, name) {
+  if (value === undefined || value === null) return;
+  if (!Array.isArray(value) || value.some((item) => !isRecord(item))) {
+    throw new Error(`status.json の ${name} の形式が不正です`);
+  }
+}
+
+function validateResult(result) {
+  if (result === undefined || result === null) return;
+  if (!isRecord(result)) throw new Error('status.json の在庫結果の形式が不正です');
+  validateRecordList(result.sizes, 'sizes');
+}
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function renderUnavailable(message, { preserveData = false } = {}) {
@@ -198,7 +220,7 @@ function renderUnavailable(message, { preserveData = false } = {}) {
 }
 
 function normalizedProducts(state) {
-  if (Array.isArray(state.products) && state.products.length) {
+  if (Array.isArray(state.products)) {
     return state.products.map((item) => ({
       styleColor: item.styleColor || item.lastResult?.product?.styleColor || '',
       url: item.url || item.lastResult?.product?.url || '#',
@@ -225,6 +247,11 @@ function normalizedProducts(state) {
   return [];
 }
 
+function hasConfirmedStock(item) {
+  return item.lastResult?.inStock === true && item.lastResult.ok !== false &&
+    item.lastResult.availabilityState !== 'unknown' && !item.lastError;
+}
+
 function renderProducts(products, { notificationsStopped = false } = {}) {
   if (!products.length) {
     productGrid.innerHTML = '<p class="empty-state">商品データはまだありません。</p>';
@@ -236,6 +263,8 @@ function renderProducts(products, { notificationsStopped = false } = {}) {
     const product = result?.product || {};
     const sizes = result?.sizes || [];
     const availableSizes = sizes.filter((size) => size.available);
+    const unknownInventory = result?.availabilityState === 'unknown';
+    const failedCheck = Boolean(item.lastError) || result?.ok === false;
     const title = product.title || `Nike商品 ${item.styleColor}`;
     const subtitle = [product.subtitle, item.styleColor, product.price].filter(Boolean).join(' / ');
     const disabled = item.settings?.enabled === false;
@@ -246,17 +275,21 @@ function renderProducts(products, { notificationsStopped = false } = {}) {
         ? item.pausedReason === 'unreachable'
           ? '長時間確認不能・自動休止'
           : '販売終了候補・自動休止'
-        : item.lastError || result?.statusLabel || '初回確認待ち';
-    const statusClass = result?.inStock && !paused && !disabled
+        : item.lastError || (unknownInventory ? '在庫判定不可' : result?.statusLabel) || '初回確認待ち';
+    const statusClass = hasConfirmedStock(item) && !paused && !disabled
       ? 'available'
-      : item.lastError || result?.ok === false || paused || disabled
+      : failedCheck || paused || disabled
         ? 'error'
         : '';
-    const sizeText = availableSizes.length
-      ? availableSizes.map((size) => size.label).join(', ')
-      : sizes.length
-        ? '在庫ありサイズなし'
-        : 'サイズ情報待ち';
+    const sizeText = failedCheck
+      ? '最新の在庫は不明'
+      : unknownInventory
+        ? '在庫判定不可'
+        : availableSizes.length
+          ? availableSizes.map((size) => size.label).join(', ')
+          : sizes.length
+            ? '在庫ありサイズなし'
+            : 'サイズ情報待ち';
     const url = safeUrl(product.url || item.url);
     const imageUrl = safeUrl(product.imageUrl || '');
     const configuredSizes = item.settings?.sizeFilters || '全サイズ';
@@ -365,7 +398,7 @@ function isStatusStale(state, config, products) {
 
 function latestDate(values) {
   return values
-    .filter(Boolean)
+    .filter((value) => typeof value === 'string' && Number.isFinite(Date.parse(value)))
     .sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null;
 }
 

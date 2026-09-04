@@ -50,7 +50,7 @@ export class MonitorStorage {
       const chunks = this.sql.exec(
         'SELECT block, part, value FROM monitor_sample_blocks ORDER BY block, part',
       ).toArray();
-      this.sampleBlocks = new Map(chunks.map((row) => [`${row.block}:${row.part}`, row]));
+      const sampleBlocks = new Map(chunks.map((row) => [`${row.block}:${row.part}`, row]));
       const blocks = new Map();
       for (const row of chunks) {
         const pieces = blocks.get(row.block) || [];
@@ -58,13 +58,18 @@ export class MonitorStorage {
         pieces.push(row.value);
         blocks.set(row.block, pieces);
       }
-      this.sampleRows = new Map();
+      const sampleRows = new Map();
       for (const pieces of blocks.values()) {
         for (const [key, position, value] of JSON.parse(pieces.join(''))) {
-          this.sampleRows.set(key, { sample_key: key, position, value });
+          sampleRows.set(key, { sample_key: key, position, value });
         }
       }
-      this.sampleGroups = groupSamples(this.sampleRows);
+      const sampleGroups = groupSamples(sampleRows);
+      // A failed block must keep subsequent reads and writes from accepting the
+      // successfully parsed prefix as the complete check history.
+      this.sampleRows = sampleRows;
+      this.sampleBlocks = sampleBlocks;
+      this.sampleGroups = sampleGroups;
     }
     return this.sampleRows;
   }
