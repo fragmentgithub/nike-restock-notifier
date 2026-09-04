@@ -1,5 +1,12 @@
 # Nike Restock Notifier
 
+## Cloudflareへの移行準備（2026-09-04）
+
+Cloudflare版を追加しました。移行先は https://nike-restock-notifier.only-this-moment.workers.dev/ です。
+**現在は移行準備中で、GitHub側の本番監視を継続しています。** 移行先は初期状態で一時停止し、管理キーとDiscord Secretの登録、Nikeへの接続検証、最新状態の引き継ぎ後に切り替えます。
+
+Cloudflare版の構成・操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。以下は切り替え前のGitHub運用の説明です。
+
 Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメント」を含むNike商品を定期確認し、対象サイズが在庫ありになったらDiscordへ通知するアプリです。すべてGitHub上で動きます。
 
 ## 仕組み

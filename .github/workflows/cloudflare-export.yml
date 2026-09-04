@@ -1,0 +1,46 @@
+name: Prepare encrypted Cloudflare migration export
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Restore monitor state
+        uses: actions/cache/restore@v6
+        with:
+          path: .monitor-state
+          key: nike-monitor-state-${{ github.run_id }}
+          restore-keys: |
+            nike-monitor-state-
+          fail-on-cache-miss: true
+
+      - name: Prepare encrypted export
+        env:
+          MIGRATION_PUBLIC_KEY: ${{ vars.CLOUDFLARE_MIGRATION_PUBLIC_KEY }}
+          REPOSITORY_VARIABLES: ${{ toJSON(vars) }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: node scripts/export-cloudflare-state.js
+
+      - name: Upload migration export
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-export-${{ github.run_id }}
+          path: .cloudflare-export/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1

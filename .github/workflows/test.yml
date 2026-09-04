@@ -25,3 +25,9 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      - name: Install Cloudflare build tools
+        run: npm ci
+
+      - name: Validate Cloudflare deployment
+        run: npm run cloudflare:build

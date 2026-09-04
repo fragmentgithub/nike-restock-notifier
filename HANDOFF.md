@@ -1,5 +1,20 @@
 # Handoff for Claude
 
+## Cloudflare移行作業（2026-09-04、以前の運用方針より優先）
+
+ユーザーがCloudflareへの移行を依頼。Workers + SQLite Durable Objectの実装を追加し、移行先は `https://nike-restock-notifier.only-this-moment.workers.dev/`。本番切り替えは未実施で、GitHub監視は稼働継続中。
+
+- `wrangler.jsonc` がCloudflareの構成。初期モードは `paused`。DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` は維持する。
+- 監視エンジンは `src/monitor-engine.js`。通常2分・発売前30秒を目安に、1回のalarmで1商品または探索1ページだけ確認する。
+- 管理操作は `ADMIN_TOKEN` Secretで保護。Discord通知は `DISCORD_WEBHOOK` Secret。
+- `npm run cloudflare:build` で公開なし検証、`npm run cloudflare:deploy` で公開する。
+- GitHub側は `MONITOR_BACKEND=cloudflare` に切り替えると監視・自己連鎖をスキップし、Pagesを移転案内にする。health workflowはCloudflareのstatus.jsonを外側から確認する（GitHub監視の自動再起動は無効）。
+- 手動 `cloudflare-export.yml` workflowは既存Actions cacheの通知済み状態と設定を保存し、Discord webhookのみ移行用公開鍵で暗号化する。公開status.jsonからの通知状態再構成は不可。
+- 移行手順と管理コマンドは [CLOUDFLARE.md](CLOUDFLARE.md)。新規管理キーと既存WebhookのCloudflare登録が自動承認レビューで拒否され、送信先を明示したユーザー許可が必要。許可を得るまで秘密値の送信や本番切り替えをしない。
+- `.cloudflare-migration/` はgit対象外の一時作業領域。既存キーを作り直さず利用する。ログ・ツール出力・公開ファイルへ内容を出さない。
+
+以下は従来GitHub運用の記録。Cloudflare移行完了後に本節を更新する。
+
 作業日: 2026-07-09 JST
 
 ## 運用方針(重要)

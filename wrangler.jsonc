@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nike-restock-notifier",
+  "account_id": "9fdb82631b485444862476ea3d8007f3",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/status.json", "/healthz", "/admin/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "MONITOR", "class_name": "NikeMonitor" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NikeMonitor"] }],
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

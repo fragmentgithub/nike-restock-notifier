@@ -28,6 +28,7 @@ jobs:
           node-version: 24
 
       - name: Recover stale monitor workflow
+        if: vars.MONITOR_BACKEND != 'cloudflare'
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -45,7 +46,7 @@ jobs:
 
       - name: Check monitor freshness
         env:
-          STATUS_URL: ${{ vars.STATUS_URL }}
+          STATUS_URL: ${{ vars.MONITOR_BACKEND == 'cloudflare' && 'https://nike-restock-notifier.only-this-moment.workers.dev/status.json' || vars.STATUS_URL }}
           HEALTH_STALE_MINUTES: ${{ vars.HEALTH_STALE_MINUTES }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/check-health.js

@@ -21,6 +21,8 @@ const activeProductCount = document.querySelector('#activeProductCount');
 const pausedProductCount = document.querySelector('#pausedProductCount');
 const monitorErrorHint = document.querySelector('#monitorErrorHint');
 const appShell = document.querySelector('#appShell');
+const platformDisplay = document.querySelector('#platformDisplay');
+const loopLabel = document.querySelector('#loopLabel');
 
 const REFRESH_INTERVAL_MS = 60000;
 const STATUS_TIMEOUT_MS = 15000;
@@ -62,6 +64,10 @@ async function refreshState() {
 
 function render(state) {
   const config = state.config || {};
+  const cloudflare = config.runtime === 'cloudflare' || state.platform?.runtime === 'cloudflare';
+  const mode = state.meta?.mode || state.platform?.mode || state.mode || 'active';
+  const paused = cloudflare && mode === 'paused';
+  const shadow = cloudflare && mode === 'shadow';
   const products = normalizedProducts(state);
   const results = products.map((item) => item.lastResult).filter(Boolean);
   const latestCheckedAt = latestDate(results.map((result) => result.checkedAt));
@@ -73,7 +79,7 @@ function render(state) {
     : state.lastError
       ? [state.lastError]
       : [];
-  const stale = isStatusStale(state, config, products);
+  const stale = !paused && isStatusStale(state, config, products);
   const configuredLoopMinutes = Number(config.loopMinutes);
   const loopMinutesValue = Number.isFinite(configuredLoopMinutes) ? configuredLoopMinutes : 25;
 
@@ -82,18 +88,26 @@ function render(state) {
     ? `${config.sizeFilters || '全サイズ'} / 商品別${overrideCount}件`
     : config.sizeFilters || '全サイズ';
   intervalDisplay.textContent = `${Number(config.intervalSeconds || 120)}秒`;
-  loopDisplay.textContent = `${loopMinutesValue}分`;
-  discordDisplay.textContent = config.discordWebhookSet ? '通知設定済み' : '未設定';
+  platformDisplay.textContent = cloudflare ? 'Cloudflare' : 'GitHub Actions';
+  loopLabel.textContent = cloudflare ? '稼働方式' : '実行時間';
+  loopDisplay.textContent = cloudflare ? '時刻に合わせて自動確認' : `${loopMinutesValue}分`;
+  discordDisplay.textContent = paused
+    ? '停止中'
+    : shadow
+      ? '検証中・通知OFF'
+      : config.discordWebhookSet ? '通知設定済み' : '未設定';
 
   const discoveryAt = state.discovery?.lastCheckedAt;
-  discoveryHint.textContent = state.discovery?.lastError
-    ? `商品探索でエラー（既知商品は監視継続）: ${state.discovery.lastError}`
-    : discoveryAt
-      ? `新商品自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
-      : '新商品自動追尾: 初回探索待ち';
+  discoveryHint.textContent = paused
+    ? `新商品自動追尾: 停止中${discoveryAt ? ` / 最終探索 ${formatDate(discoveryAt)}` : ''}`
+    : state.discovery?.lastError
+      ? `商品探索でエラー（既知商品は監視継続）: ${state.discovery.lastError}`
+      : discoveryAt
+        ? `新商品自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
+        : '新商品自動追尾: 初回探索待ち';
 
-  setText(runStatus, stale ? '更新遅延' : '自動監視中');
-  runStatus.className = `status-pill ${stale ? 'error' : 'running'}`;
+  setText(runStatus, paused ? '一時停止中' : stale ? '更新遅延' : shadow ? '検証中・通知OFF' : '自動監視中');
+  runStatus.className = `status-pill ${stale ? 'error' : paused ? '' : 'running'}`;
   const statusMessages = stale
     ? ['ステータスの更新が遅延しています。表示内容は最新でない可能性があります。', ...monitorErrors]
     : monitorErrors;
@@ -101,8 +115,8 @@ function render(state) {
     ? '状態不明'
     : monitorErrors.length
       ? `${monitorErrors.length}件エラー`
-      : '正常');
-  checkStatus.className = `small-status ${stale || monitorErrors.length ? 'error' : 'ok'}`;
+      : paused ? '一時停止' : '正常');
+  checkStatus.className = `small-status ${stale || monitorErrors.length ? 'error' : paused ? '' : 'ok'}`;
   monitorErrorHint.setAttribute('role', 'status');
   monitorErrorHint.setAttribute('aria-live', 'polite');
   monitorErrorHint.hidden = statusMessages.length === 0;
@@ -116,15 +130,17 @@ function render(state) {
       ? formatDate(state.updatedAt)
       : '-';
   const monitorableCount = products.filter((item) => item.settings?.enabled !== false).length;
-  nextCheck.textContent = stale
-    ? '更新遅延のため不明'
-    : state.nextCheckAt
-      ? formatDate(state.nextCheckAt)
-      : monitorableCount > 0
-        ? `商品ごと 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`
-        : '監視対象なし';
+  nextCheck.textContent = paused
+    ? '停止中'
+    : stale
+      ? '更新遅延のため不明'
+      : state.nextCheckAt
+        ? formatDate(state.nextCheckAt)
+        : monitorableCount > 0
+          ? `商品ごと 約${Math.max(1, Math.round(Number(config.intervalSeconds || 120) / 60))}分`
+          : '監視対象なし';
 
-  renderProducts(products);
+  renderProducts(products, { notificationsStopped: paused || shadow });
   renderQuality(state.metrics || {}, { stale });
   renderStockHistory(state.history || []);
   renderEvents(state.events || []);
@@ -204,7 +220,7 @@ function normalizedProducts(state) {
   return [];
 }
 
-function renderProducts(products) {
+function renderProducts(products, { notificationsStopped = false } = {}) {
   if (!products.length) {
     productGrid.innerHTML = '<p class="empty-state">商品データはまだありません。</p>';
     return;
@@ -239,7 +255,7 @@ function renderProducts(products) {
     const url = safeUrl(product.url || item.url);
     const imageUrl = safeUrl(product.imageUrl || '');
     const configuredSizes = item.settings?.sizeFilters || '全サイズ';
-    const notifyLabel = item.settings?.notify === false ? '通知OFF' : '通知ON';
+    const notifyLabel = notificationsStopped || item.settings?.notify === false ? '通知OFF' : '通知ON';
 
     return `
       <article class="product-card">
@@ -324,10 +340,22 @@ function isStatusStale(state, config, products) {
   const loopMinutes = Number.isFinite(configuredLoopMinutes) && configuredLoopMinutes >= 0
     ? configuredLoopMinutes
     : 25;
-  const staleAfterSeconds = Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
+  const cloudflare = config.runtime === 'cloudflare' || state.platform?.runtime === 'cloudflare';
+  const staleAfterSeconds = cloudflare
+    ? Math.max(intervalSeconds * 3, 600)
+    : Math.max(intervalSeconds * 3, loopMinutes * 60 * 2);
+  // Backoff and automatically paused products can have a later scheduled check.
+  // Allow two minutes after that check is due before treating the status as stale.
+  const nextCheckTimestamp = cloudflare ? Date.parse(state.nextCheckAt || '') : Number.NaN;
+  const staleAt = Math.max(
+    lastCheckedTimestamp + staleAfterSeconds * 1000,
+    Number.isFinite(nextCheckTimestamp) && nextCheckTimestamp >= lastCheckedTimestamp
+      ? nextCheckTimestamp + 2 * 60 * 1000
+      : 0,
+  );
   const ageMs = Date.now() - lastCheckedTimestamp;
   // A materially future timestamp is just as untrustworthy as an old one.
-  return ageMs < -5 * 60 * 1000 || ageMs > staleAfterSeconds * 1000;
+  return ageMs < -5 * 60 * 1000 || Date.now() > staleAt;
 }
 
 function latestDate(values) {

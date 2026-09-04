@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   monitor-and-deploy:
+    if: vars.MONITOR_BACKEND != 'cloudflare'
     runs-on: ubuntu-latest
     timeout-minutes: 355
     outputs:
@@ -96,7 +97,7 @@ jobs:
 
   # 自己連鎖に必要な actions:write は短時間の専用ジョブだけへ付与する。
   queue-next-run:
-    if: always()
+    if: always() && vars.MONITOR_BACKEND != 'cloudflare'
     needs: monitor-and-deploy
     runs-on: ubuntu-latest
     permissions:
@@ -125,3 +126,27 @@ jobs:
           else
             echo "A newer monitor run is already queued; skipping self-dispatch."
           fi
+
+  cloudflare-redirect:
+    if: vars.MONITOR_BACKEND == 'cloudflare'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Prepare migration redirect
+        run: node scripts/build-pages-redirect.js
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: .github-pages-redirect
+      - uses: actions/deploy-pages@v5
+        id: deployment

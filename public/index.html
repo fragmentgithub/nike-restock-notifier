@@ -20,7 +20,7 @@
         <section class="panel settings-panel">
           <div class="section-title">
             <h2>監視設定</h2>
-            <span class="small-status ok">GitHub Actions</span>
+            <span class="small-status ok" id="platformDisplay">Cloudflare</span>
           </div>
 
           <div class="settings-summary">
@@ -29,11 +29,11 @@
               <strong id="sizeFiltersDisplay">全サイズ</strong>
             </div>
             <div>
-              <span>巡回後の待機</span>
+              <span>標準の確認間隔</span>
               <strong id="intervalDisplay">-</strong>
             </div>
             <div>
-              <span>実行時間</span>
+              <span id="loopLabel">稼働方式</span>
               <strong id="loopDisplay">-</strong>
             </div>
             <div>
@@ -43,11 +43,10 @@
           </div>
 
           <p class="hint" id="discoveryHint">新商品自動追尾: 読み込み中</p>
+          <p class="hint">この画面は閲覧専用です。表示は1分ごとに更新されます。</p>
           <div class="pages-links">
-            <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/pages.yml" target="_blank" rel="noreferrer">Monitor</a>
-            <a href="https://github.com/fragmentgithub/nike-restock-notifier/actions/workflows/discord-test.yml" target="_blank" rel="noreferrer">Discord Test</a>
-            <a href="https://github.com/fragmentgithub/nike-restock-notifier/settings/secrets/actions" target="_blank" rel="noreferrer">Secrets</a>
-            <a href="https://github.com/fragmentgithub/nike-restock-notifier/settings/variables/actions" target="_blank" rel="noreferrer">Variables</a>
+            <a href="https://github.com/fragmentgithub/nike-restock-notifier" target="_blank" rel="noreferrer">ソースコード</a>
+            <a href="https://github.com/fragmentgithub/nike-restock-notifier/blob/main/CLOUDFLARE.md" target="_blank" rel="noreferrer">運用ガイド</a>
           </div>
         </section>
 

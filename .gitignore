@@ -2,5 +2,12 @@ data/*.json
 .monitor-state/
 .health-state/
 node_modules/
+.wrangler/
+.cloudflare-migration/
+.cloudflare-export/
+.github-pages-redirect/
+dist/
+.dev.vars*
+worker-configuration.d.ts
 .DS_Store
 Thumbs.db
