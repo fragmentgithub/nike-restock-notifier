@@ -16,6 +16,37 @@
         <div class="status-pill" id="runStatus" role="status" aria-live="polite" aria-atomic="true">読み込み中</div>
       </section>
 
+      <section class="panel trend-panel" aria-labelledby="trendTitle">
+        <div class="section-title trend-heading">
+          <div>
+            <h2 id="trendTitle">リストックの時間帯</h2>
+            <p class="trend-subtitle">検出時刻（日本時間）</p>
+          </div>
+          <div class="trend-filters">
+            <label>商品
+              <select id="trendProduct" disabled>
+                <option value="all">全商品</option>
+              </select>
+            </label>
+            <label>期間
+              <select id="trendPeriod" disabled>
+                <option value="all">保存履歴すべて</option>
+                <option value="7">直近7日</option>
+                <option value="30">直近30日</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="metric-grid trend-metrics">
+          <div><span>対象の入荷検出</span><strong id="trendTotal">-</strong></div>
+          <div><span>最多の時間帯</span><strong id="trendPeak">-</strong></div>
+          <div><span>保存されている履歴の期間</span><strong id="trendRange">-</strong></div>
+        </div>
+        <p class="trend-message" id="trendMessage" role="status" aria-live="polite">履歴を読み込み中です。</p>
+        <div class="trend-chart" id="trendChart" role="img" aria-label="入荷検出時刻のグラフを読み込み中" aria-describedby="trendNote"></div>
+        <p class="hint" id="trendNote">同じ商品・同時刻の入荷検出を、サイズ数にかかわらず1件として集計。実際の補充時刻とはずれる場合があります。保存履歴の範囲に限られ、期間全体の記録や将来の入荷予測を示すものではありません。</p>
+      </section>
+
       <section class="layout">
         <section class="panel settings-panel">
           <div class="section-title">

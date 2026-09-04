@@ -1,3 +1,6 @@
+import { createTrendView } from './trend-view.js';
+
+const trendView = createTrendView(document);
 const runStatus = document.querySelector('#runStatus');
 const checkStatus = document.querySelector('#checkStatus');
 const sizeFiltersDisplay = document.querySelector('#sizeFiltersDisplay');
@@ -144,6 +147,7 @@ function render(state) {
   renderQuality(state.metrics || {}, { stale });
   renderStockHistory(state.history || []);
   renderEvents(state.events || []);
+  trendView.render(state);
 }
 
 function validateStatusPayload(state) {
@@ -159,6 +163,7 @@ function validateStatusPayload(state) {
 }
 
 function renderUnavailable(message, { preserveData = false } = {}) {
+  trendView.unavailable({ preserveData });
   setText(runStatus, '取得失敗');
   runStatus.className = 'status-pill error';
   setText(checkStatus, preserveData ? '更新エラー' : 'エラー');
