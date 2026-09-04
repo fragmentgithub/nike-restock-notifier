@@ -1,93 +1,34 @@
 # Nike Restock Notifier
 
-## Cloudflareで本番監視中（2026-09-05）
+**ページは非公開とし、画面の作り込みより監視・通知ロジックを優先します。** Nike Mind 001のメンズ商品と、商品名にFragment／フラグメントを含むNike商品を追跡し、対象サイズの入荷をDiscordへ通知します。
 
-ステータスページ: https://nike-restock-notifier.only-this-moment.workers.dev/
-**2026-09-05 01:32 JSTに本番監視をCloudflareへ切り替えました。** 8商品の監視状態、通知済み情報、在庫履歴を引き継ぎ、Discord通知を有効にしています。Cloudflareでの定期起動・商品取得・正常状態を確認済みです。
+2026-09-05に本番監視をCloudflareへ移行済みです。非公開化とロジック改善も本番へ反映し、旧GitHub Pagesの公開停止、認証なしでのステータス取得拒否、監視・商品取得の正常動作を確認しました。認証付きの外側health workflowも再開し、正常判定を確認済みです。
 
-旧GitHub監視は停止済みです。旧GitHub Pages URLは新しいページへ自動で移動します。GitHubにはソースコード・CI・Cloudflareの更新停止を確認するhealth workflowを残しています。
+## 構成
 
-Cloudflare版の構成・操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。以下は切り替え前のGitHub運用の説明です。
+- WorkersとSQLite Durable Objectが監視状態・通知済み情報・履歴を保存します。
+- 通常は商品ごとに約2分、発売前は約30秒を目安に確認します。
+- 新商品を探索し、確認不能な商品を自動休止・再確認します。
+- GitHubにはソースコード・CI・認証付きのhealth確認を残します。
 
-Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメント」を含むNike商品を定期確認し、対象サイズが在庫ありになったらDiscordへ通知するアプリです。
+静的ページの配信は削除しました。`/`、`/index.html`、`/app.js` は404を返し、`/status.json` と `/admin/status` は管理認証が必要です。`/healthz` は管理認証または指定のGitHub health workflowのOIDC認証を要求し、商品情報や履歴を返しません。
 
-## 旧GitHub方式の仕組み
+## 状態の確認
 
-- GitHub Actionsが商品ごとの次回確認時刻を管理し、通常は各商品を約2分間隔で確認します
-- メンズの既知カラーを商品ごとに監視し、ウィメンズ商品は除外します
-- Nike公式の商品一覧・SNKRS・各商品ページを探索し、Mind 001の新カラーとFragment商品を自動的に追跡対象へ追加します
-- 確認済みの `Mind 001 x Fragment` と `Mind 002 x Fragment` は初期登録され、通常商品と同じ条件で通知します
-- 在庫が出たらその場でDiscord webhookへ通知します
-- 発売前商品は個別に短い間隔で確認し、通常商品へのアクセス頻度は維持します
-- 404/410が続く販売終了候補や長時間確認不能な商品は自動休止し、定期再確認または公式ページでの再検出時に復帰します
-- 在庫変化履歴と直近24時間の成功率・平均応答時間をGitHub Pagesに表示します
-- 独立した `health.yml` がPagesの更新停止と復旧をDiscordへ通知し、Pages承認待ちで固まった監視実行を自動解除します
-- 最新のステータスはGitHub Pagesに表示されます(ページの更新は実行単位なので最大25分程度遅れます。通知は即時です)
+管理キーを利用して、ステータスを非公開のローカルファイルへ保存します。
 
-ステータスページ: https://fragmentgithub.github.io/nike-restock-notifier/
-
-## 旧GitHub方式の設定
-
-GitHubのリポジトリ設定で以下を追加します。
-
-- Secret: `DISCORD_WEBHOOK` Discord webhookのURL
-- Variable: `SIZE_FILTERS` 例: `26,27`(空なら全サイズ対象)
-- Variable: `PRODUCT_URL` 変更したい商品URLがある場合だけ
-- Variable: `PRODUCT_URLS` 追加商品URL。カンマ区切りまたは改行区切り(任意)
-- Variable: `INTERVAL_SECONDS` 通常商品の商品ごとの再確認間隔(デフォルト120秒、最小30秒)
-- Variable: `LOOP_MINUTES` 1回の実行がチェックし続ける分数(デフォルト25)
-- Variable: `DISCOVERY_URL` 新カラー探索に使うNike公式一覧URL(通常は未設定で可)
-- Variable: `FRAGMENT_DISCOVERY_URLS` Fragment探索に使うNike SNKRS一覧URL。カンマまたは改行区切り(通常は未設定で可)
-- Variable: `DISCOVERY_INTERVAL_HOURS` 新カラー探索間隔(デフォルト6時間)
-- Variable: `DISCOVERY_RETRY_MINUTES` 新カラー探索失敗時の再試行間隔(デフォルト30分)
-- Variable: `PRODUCT_CHECK_DELAY_MS` 商品間のアクセス待機時間(デフォルト1500ミリ秒)
-- Variable: `PRODUCT_CONFIG_JSON` 商品別のサイズ・通知・有効/無効・メンション設定(JSON、任意)
-- Variable: `DELIST_FAILURE_THRESHOLD` 明示的な404/410が何回続いたら自動休止するか(デフォルト12)
-- Variable: `PAUSED_RECHECK_HOURS` 自動休止商品の再確認間隔(デフォルト24時間)
-- Variable: `UPCOMING_INTERVAL_SECONDS` 発売前商品の確認間隔(デフォルト30秒)
-- Variable: `UPCOMING_WINDOW_MINUTES` 発売日時の何分前から短間隔にするか(デフォルト180分)
-- Variable: `DISCORD_MENTION` 全商品共通のDiscordユーザー/ロールメンション。例 `<@&123456789>`
-- Variable: `STATUS_URL` watchdogが確認するstatus.json URL(通常は未設定で可)
-- Variable: `HEALTH_STALE_MINUTES` 更新停止と判定する時間(デフォルト50分)。実効閾値は誤報防止のため `LOOP_MINUTES + 20分` より短くなりません
-- Variable: `MONITOR_WAITING_STALE_MINUTES` Pages承認待ちで固まった監視実行を自動解除する時間(デフォルト90分、最小30分)
-
-`PRODUCT_URL`を設定しなくても、Mind 001の確認済みカラーと確認済みFragment商品が初期登録されます。検出した新商品はActions cacheに保存され、以後の実行でも監視を継続します。
-
-Secret設定後のテストは、GitHub Actionsの `Discord Test` workflowを手動実行します。
-
-### 商品別設定
-
-`PRODUCT_CONFIG_JSON` はスタイルカラーをキーにします。`sizes` が空配列なら、その商品だけ全サイズ対象です。
-
-```json
-{
-  "HQ4307-005": {
-    "sizes": ["27", "28"],
-    "notify": true,
-    "enabled": true,
-    "mention": "<@&123456789>"
-  },
-  "IQ8502-001": {
-    "sizes": [],
-    "notify": false
-  }
-}
+```powershell
+node scripts/cloudflare-admin.js health
+node scripts/cloudflare-admin.js status .cloudflare-migration/status-private.json
 ```
 
-`notify: false` は監視と履歴記録を続けたまま通知だけ止めます。`enabled: false` は商品確認そのものを停止します。
-商品別の `mention: ""` は、その商品だけグローバルメンションを明示的に無効化します。
-JSONが不正な場合は安全のため商品確認と通知を停止し、Pagesに設定エラーを表示します。既定設定へ暗黙に戻ることはありません。
+`public/status.json` はGit管理から除外し、ローカルにのみ残します。旧 `pages.yml` と移転案内の生成処理は削除済みです。
 
-## 旧GitHub方式の注意
+## 今回のロジック改善
 
-- 実行が終わると、監視対象があり、次の商品確認が「次のrunの実行時間内」かつ30分以内の場合だけ次の実行を自動で起動します。単発モード・監視対象なし・それより先の確認は自己起動を省略し、30分間隔のcronへ引き継ぎます
-- 異常終了時は30分間隔のスケジュール実行がバックアップとして再開します
-- 直近の時間窓で複数商品の取得がすべて失敗する場合は確認間隔を最大10分まで自動的に延ばし、Nike側への連続アクセスを抑えます
-- 在庫履歴・品質サンプル・自動休止状態はActions cacheに保存されます。workflowが長期間停止してcacheが失効すると履歴はリセットされます
-- Nike側のページ仕様が変わると、在庫判定の調整(`src/nike.js`)が必要になることがあります
+- 通常の商品確認で行う監視エンジンの保存を3回から1回に減らし、Durable Object起動時の全履歴再保存も廃止しました。
+- SKU情報の欠落・未知状態では通知済み情報を保持し、誤った売切れ・再入荷判定を防ぎます。
+- カタログで再検出した休止商品が3回続けて確認できない場合は、通常の日次再確認へ戻します。
+- 商品ページの解析済みJSONを再利用し、同じ内容の二重解析を減らしました。
 
-## ローカル確認
-
-`npm start` は `public/` の画面を読み取り専用でプレビューします。監視・通知は起動しません。Cloudflareの運用操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。
-
-開発の引き継ぎ情報は [HANDOFF.md](HANDOFF.md) を参照してください。
+運用・設定・保存上の制約は [CLOUDFLARE.md](CLOUDFLARE.md)、開発の引き継ぎは [HANDOFF.md](HANDOFF.md) を参照してください。
