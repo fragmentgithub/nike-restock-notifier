@@ -86,7 +86,7 @@ export async function createCloudflareExport({
   return { directory: resolve(outputDirectory), productCount: metadata.productCount };
 }
 
-function readMigrationPublicKey(value) {
+export function readMigrationPublicKey(value) {
   const pem = String(value || '').trim();
   if (!/^-----BEGIN (?:RSA )?PUBLIC KEY-----\r?\n/.test(pem)) {
     throw new Error('MIGRATION_PUBLIC_KEY must contain an RSA public PEM key.');
@@ -114,7 +114,7 @@ function parseObject(value, label) {
   return parsed;
 }
 
-function validateMonitorState(state) {
+export function validateMonitorState(state) {
   if (!isObject(state.knownProducts) || Object.keys(state.knownProducts).length === 0) {
     throw new Error('Monitor state must contain knownProducts entries.');
   }

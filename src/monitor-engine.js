@@ -13,6 +13,7 @@ import {
   discoverNikeFragmentProducts,
   discoverNikeMind001Products,
   isWomensNikeProduct,
+  normalizeNikeProductUrl,
 } from './discovery.js';
 import {
   applyCheckState,
@@ -463,7 +464,18 @@ export function createMonitorEngine({
     }
     const existing = state.knownProducts[styleColor];
     if (existing) {
-      if (product.url) existing.url = product.url;
+      const initialSeed = source === 'initial' || source === 'fragment-initial';
+      if (product.url && (!initialSeed || !normalizeNikeProductUrl(existing.url, { styleColor }))) {
+        existing.url = parsed.url;
+      }
+      if (existing.urlRepairPending && (source === 'catalog' || source === 'fragment-catalog')) {
+        // A recovered path alone does not prove that a paused product is present.
+        // Authoritative catalog rediscovery schedules a probe; only a successful
+        // product check is allowed to clear the existing lifecycle pause.
+        existing.catalogReprobePending = true;
+        existing.lastSeenAt = null;
+        existing.urlRepairPending = false;
+      }
       return { added: false, entry: existing };
     }
 
@@ -499,17 +511,19 @@ export function createMonitorEngine({
     for (const [key, product] of Object.entries(value)) {
       if (!product?.url) continue;
       try {
-        const parsed = parseNikeProductUrl(product.url, { styleColor: product.styleColor || key });
+        const repair = repairLegacyProductUrl(product.url, product.styleColor || key);
+        const productUrl = repair.url || product.url;
+        const parsed = parseNikeProductUrl(productUrl, { styleColor: product.styleColor || key });
         const styleColor = String(product.styleColor || key || parsed.styleColor).toUpperCase();
         if (isWomensNikeProduct({
           ...product,
           ...product.lastResult?.product,
           styleColor,
-          url: product.url,
+          url: productUrl,
         })) continue;
         normalized[styleColor] = {
           styleColor,
-          url: product.url,
+          url: productUrl,
           source: product.source || 'state',
           discoveredAt: product.discoveredAt || new Date(clock()).toISOString(),
           lastSeenAt: product.lastSeenAt || null,
@@ -526,6 +540,7 @@ export function createMonitorEngine({
           catalogPresent: typeof product.catalogPresent === 'boolean' ? product.catalogPresent : undefined,
           lastCatalogSeenAt: product.lastCatalogSeenAt || null,
           catalogReprobePending: product.catalogReprobePending === true,
+          urlRepairPending: product.urlRepairPending === true || repair.detected,
           upcomingReleaseAt: product.upcomingReleaseAt || null,
           stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],
           lastResult: product.lastResult || null,
@@ -536,6 +551,23 @@ export function createMonitorEngine({
       }
     }
     return normalized;
+  }
+
+  function repairLegacyProductUrl(value, styleColor) {
+    try {
+      const url = new URL(value);
+      let detected = false;
+      const segments = url.pathname.split('/').filter((segment) => {
+        if (decodeURIComponent(segment) !== '[object Object]') return true;
+        detected = true;
+        return false;
+      });
+      if (!detected) return { detected: false, url: '' };
+      url.pathname = segments.join('/');
+      return { detected: true, url: normalizeNikeProductUrl(url.toString(), { styleColor }) };
+    } catch {
+      return { detected: false, url: '' };
+    }
   }
 
   function trackedProducts() {

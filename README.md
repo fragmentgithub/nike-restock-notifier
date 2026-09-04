@@ -1,9 +1,11 @@
 # Nike Restock Notifier
 
-## Cloudflareへの移行準備（2026-09-04）
+## Cloudflareへの移行準備（2026-09-05）
 
 Cloudflare版を追加しました。移行先は https://nike-restock-notifier.only-this-moment.workers.dev/ です。
-**現在は移行準備中で、GitHub側の本番監視を継続しています。** 移行先は初期状態で一時停止し、管理キーとDiscord Secretの登録、Nikeへの接続検証、最新状態の引き継ぎ後に切り替えます。
+**現在は移行準備中で、GitHub側の本番監視を継続しています。** Cloudflareへの管理キー・既存Discord Webhookの登録はユーザー承認済みで、管理キーは登録済みです。Nikeへの接続確認と、最新の通知済み状態・Webhookの引き継ぎ後に切り替えます。
+
+移行データは `cloudflare-transfer.yml` からCloudflareへ直接送ります。GitHub OIDCで送信元を確認し、Webhookは暗号化して転送します。
 
 Cloudflare版の構成・操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。以下は切り替え前のGitHub運用の説明です。
 

@@ -1,7 +1,7 @@
 import { MonitorStorage } from './worker-storage.js';
 import { createMonitorEngine } from './monitor-engine.js';
 import { normalizeDiscordWebhook } from './discord.js';
-import { MONITOR_MODES, scrubOutput, selectConfig, validateImport } from './worker-admin.js';
+import { MONITOR_MODES, scrubOutput, selectConfig, validateImport, validateMigrationTransfer } from './worker-admin.js';
 import { boundedFetch } from './worker-network.js';
 import { probeNike } from './worker-probe.js';
 
@@ -89,11 +89,50 @@ export class MonitorController {
   }
 
   async importState(payload) {
+    return this.exclusive(() => this.applyImport(payload));
+  }
+
+  async acceptMigration(payload, identity) {
     return this.exclusive(async () => {
+      const error = validateMigrationTransfer(payload, identity);
+      if (error) return failure(400, error);
+      const { encryptedWebhook, ...importPayload } = payload;
+      return this.applyImport(importPayload, {
+        sourceRun: { runId: identity.runId, runAttempt: identity.runAttempt },
+        credential: { migrationId: identity.migrationId, encryptedWebhook },
+      });
+    });
+  }
+
+  async migrationCredential() {
+    return this.exclusive(async () => {
+      const credential = this.documents.read('migration-credential');
+      return credential
+        ? { migrationId: credential.migrationId, encryptedWebhook: credential.encryptedWebhook }
+        : failure(404, 'No migration credential is stored.');
+    });
+  }
+
+  async deleteMigrationCredential(migrationId) {
+    return this.exclusive(async () => {
+      if (typeof migrationId !== 'string' || !migrationId) return failure(400, 'migrationId is required.');
+      const credential = this.documents.read('migration-credential');
+      if (credential && credential.migrationId !== migrationId) return failure(409, 'Migration identity does not match.');
+      await this.documents.commit({ 'migration-credential': null });
+      return { ok: true, deleted: Boolean(credential) };
+    });
+  }
+
+  async applyImport(payload, { credential, sourceRun } = {}) {
       const error = validateImport(payload);
       if (error) return failure(400, error);
       const control = this.control();
       if (control.mode !== 'paused') return failure(409, 'Pause the monitor before importing state.');
+      if (sourceRun && control.lastMigrationRun) {
+        const difference = compareRuns(sourceRun, control.lastMigrationRun);
+        if (difference < 0) return failure(409, 'A newer migration has already been accepted.');
+        if (difference === 0) return { ok: true, mode: 'paused', imported: false, migrationId: payload.migrationId };
+      }
       if (payload.migrationId && payload.migrationId === control.migrationId) {
         return { ok: true, mode: control.mode, imported: false, migrationId: control.migrationId };
       }
@@ -101,11 +140,24 @@ export class MonitorController {
         ...control, vars: selectConfig(payload.vars ?? payload.config ?? control.vars),
         importedAt: new Date(this.now()).toISOString(), migrationId: payload.migrationId || null,
         lastError: null,
+        ...(sourceRun ? { lastMigrationRun: sourceRun } : {}),
       };
-      const engine = this.engine(nextControl, this.safe(payload.state));
+      const importedState = this.safe(payload.state);
+      if (sourceRun) {
+        // Resolve canonical product URLs immediately after a new legacy transfer.
+        // Notification keys and all observation/history records stay intact.
+        delete importedState.discoveryCycle;
+        delete importedState.lastDiscoveryAt;
+        delete importedState.lastDiscoverySuccessAt;
+        delete importedState.lastDiscoveryAttemptAt;
+      }
+      const engine = this.engine(nextControl, importedState);
       const status = engine.status();
       const state = engine.snapshot();
-      await this.documents.commit({ control: nextControl, state, status: this.safe(status) });
+      await this.documents.commit({
+        control: nextControl, state, status: this.safe(status),
+        ...(credential ? { 'migration-credential': credential } : {}),
+      });
       await this.ctx.storage.deleteAlarm();
       return {
         ok: true, mode: 'paused', imported: true, migrationId: nextControl.migrationId,
@@ -113,7 +165,6 @@ export class MonitorController {
         checkSamples: state.checkSamples?.length || 0,
         history: state.history?.length || 0, events: state.events?.length || 0,
       };
-    });
   }
 
   async setMode(mode) {
@@ -201,3 +252,8 @@ export class MonitorController {
 }
 
 function failure(status, error) { return { ok: false, status, error }; }
+function compareRuns(left, right) {
+  const runDifference = BigInt(left.runId) - BigInt(right.runId);
+  const difference = runDifference || BigInt(left.runAttempt) - BigInt(right.runAttempt);
+  return difference > 0n ? 1 : difference < 0n ? -1 : 0;
+}

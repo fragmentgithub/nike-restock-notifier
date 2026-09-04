@@ -1,6 +1,6 @@
 # Handoff for Claude
 
-## Cloudflare移行作業（2026-09-04、以前の運用方針より優先）
+## Cloudflare移行作業（2026-09-05、以前の運用方針より優先）
 
 ユーザーがCloudflareへの移行を依頼。Workers + SQLite Durable Objectの実装を追加し、移行先は `https://nike-restock-notifier.only-this-moment.workers.dev/`。本番切り替えは未実施で、GitHub監視は稼働継続中。
 
@@ -9,8 +9,13 @@
 - 管理操作は `ADMIN_TOKEN` Secretで保護。Discord通知は `DISCORD_WEBHOOK` Secret。
 - `npm run cloudflare:build` で公開なし検証、`npm run cloudflare:deploy` で公開する。
 - GitHub側は `MONITOR_BACKEND=cloudflare` に切り替えると監視・自己連鎖をスキップし、Pagesを移転案内にする。health workflowはCloudflareのstatus.jsonを外側から確認する（GitHub監視の自動再起動は無効）。
-- 手動 `cloudflare-export.yml` workflowは既存Actions cacheの通知済み状態と設定を保存し、Discord webhookのみ移行用公開鍵で暗号化する。公開status.jsonからの通知状態再構成は不可。
-- 移行手順と管理コマンドは [CLOUDFLARE.md](CLOUDFLARE.md)。新規管理キーと既存WebhookのCloudflare登録が自動承認レビューで拒否され、送信先を明示したユーザー許可が必要。許可を得るまで秘密値の送信や本番切り替えをしない。
+- 2026-09-05にユーザーが移行先への新規 `ADMIN_TOKEN` と既存 `DISCORD_WEBHOOK` の登録を明示承認。`ADMIN_TOKEN` の登録は完了済み。Webhookの引き継ぎと本番切り替えは準備中。
+- 手動 `cloudflare-transfer.yml` は既存Actions cacheの通知済み状態、許可した通常設定、RSA-OAEP SHA256で暗号化したWebhookを、GitHubから移行先 `/migration/transfer` へ直接送る。受信側はGitHub OIDCのリポジトリ・所有者ID・main・指定の手動workflow・audienceを検証し、paused時だけ取り込む。GitHubにCloudflareの管理キーを追加登録しない。
+- GitHub artifactへの暗号化Webhookの追加保存は別途自動承認レビューで拒否されたため、`cloudflare-export.yml` は削除し、転送手順を直接送信へ変更した。`scripts/export-cloudflare-state.js` は検証用関数と既存テスト用に残るが、artifact workflowは使用しない。
+- 転送された暗号文はCloudflareに非公開で一時保存される。`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で取得し、`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` でWorkers Secretへ登録する。登録成功後に `node scripts/cloudflare-admin.js clear-credential` で一時保存した暗号文を削除する。
+- 最終転送前はGitHubのhealthとpages workflowを無効化し、未開始の待機実行を取り消す。進行中の監視は状態保存まで自然終了させ、最終キャッシュの正確なキーを `cloudflare-transfer.yml` の `cache_key` に指定する。公開status.jsonからの通知状態再構成は不可。
+- 接続確認では固定初期商品 `HQ4307-005` とFragmentページがCloudflare・GitHubの双方で404。一方、Cloudflareの商品探索は現行商品4件を取得できた。現行商品の個別取得を引き続き確認する。
+- 移行手順と管理コマンドは [CLOUDFLARE.md](CLOUDFLARE.md)。旧GitHub監視は最終状態を保存するまで維持し、切り替え完了後に実施結果を記録する。
 - `.cloudflare-migration/` はgit対象外の一時作業領域。既存キーを作り直さず利用する。ログ・ツール出力・公開ファイルへ内容を出さない。
 
 以下は従来GitHub運用の記録。Cloudflare移行完了後に本節を更新する。

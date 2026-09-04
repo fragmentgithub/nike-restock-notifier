@@ -1,4 +1,4 @@
-import { extractNikeMind001Products } from './discovery.js';
+import { extractNikeMind001Products, normalizeNikeProductUrl } from './discovery.js';
 import { errorMessage, fetchWithTimeout, firstPresent, parseNextData } from './util.js';
 
 const NIKE_CHANNEL_ID = 'd9a5bc42-4b9c-4976-858a-f159cf99c647';
@@ -592,7 +592,9 @@ function buildProductFromNextData(selectedProduct, pageProps, productRef) {
     title: productInfo.fullTitle || productInfo.title || 'Nike product',
     subtitle: productInfo.subtitle || selectedProduct.colorDescription || '',
     styleColor: selectedProduct.styleColor || productRef.styleColor,
-    url: absoluteNikeUrl(productInfo.url || selectedProduct.pdpUrl || pageProps.slug, productRef.url),
+    url: normalizeNikeProductUrl([productInfo.url, selectedProduct.pdpUrl, pageProps.slug], {
+      styleColor: productRef.styleColor, sourceUrl: productRef.url,
+    }) || productRef.url,
     imageUrl,
     price: formatNextPrice(selectedProduct.prices),
   };
@@ -644,16 +646,6 @@ function formatNextPrice(price) {
     }).format(value);
   } catch {
     return `${price.currency || ''} ${value}`.trim();
-  }
-}
-
-function absoluteNikeUrl(value, fallback) {
-  if (!value) return fallback;
-
-  try {
-    return new URL(value, 'https://www.nike.com').toString();
-  } catch {
-    return fallback;
   }
 }
 

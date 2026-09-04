@@ -139,6 +139,21 @@ test('ページのデフォルトカラーよりURL指定カラーを優先す�
   assert.equal(result.product.title, 'Nike Mind 001 HQ4307-005');
 });
 
+test('商品URLオブジェクトを解決し、不明な形式なら正しい代替候補を使う', async () => {
+  const currentPath = '/jp/t/mind-001-current/HQ4307-005';
+  const selectedProduct = product('HQ4307-005', { sizes: [size('27', 'ACTIVE')] });
+  selectedProduct.productInfo.url = { unexpected: 'unknown-url-shape' };
+  selectedProduct.pdpUrl = { url: `https://www.nike.com${currentPath}`, path: currentPath };
+  const result = await checkWithNextData({ selectedProduct });
+  assert.equal(result.ok, true);
+  assert.equal(result.product.url, `https://www.nike.com${currentPath}`);
+
+  selectedProduct.productInfo.url = '/[object%20Object]/HQ4307-005';
+  selectedProduct.pdpUrl = { url: 'https://example.com/jp/t/product/HQ4307-005' };
+  const fallback = await checkWithNextData({ selectedProduct });
+  assert.equal(fallback.product.url, PRODUCT_URL);
+});
+
 test('Nike商品ではない200応答を成功扱いしない', async () => {
   let calls = 0;
   const fetchImpl = async () => {

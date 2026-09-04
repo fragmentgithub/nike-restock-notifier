@@ -210,6 +210,40 @@ test('URL形式の nike-mind-001(ハイフン区切り)でも新カラーを検�
   assert.ok(found.includes('HQ8888-200'));
 });
 
+test('NikeのpdpUrlオブジェクトから新カラーのURLを読み取り文字列へ誤変換しない', () => {
+  const products = ['HQ4307-200', 'HQ4307-300', 'HQ4307-302'].map((styleColor) => {
+    const path = `/jp/t/mind-001-mens-pregame-mules-Wwm9WFWW/${styleColor}`;
+    return {
+      styleColor,
+      pdpUrl: { url: `https://www.nike.com${path}`, canonicalUrl: path.replace(`/${styleColor}`, ''), path },
+      productInfo: { fullTitle: 'Nike Mind 001 メンズ プレゲーム ミュール', url: path },
+    };
+  });
+  const payload = { props: { pageProps: { productGroups: [{ products }] } } };
+  const html = `<script id="__NEXT_DATA__">${JSON.stringify(payload)}</script>`;
+  assert.deepEqual(extractNikeMind001Products(html), products.map((product) => ({
+    styleColor: product.styleColor, url: product.pdpUrl.url,
+  })));
+});
+
+test('解析不能なURLオブジェクトは正しい代替URLやページ内リンクを隠さない', () => {
+  const payload = { props: { pageProps: { products: [
+    {
+      styleColor: 'HQ4307-200', pdpUrl: { trackingId: 'unknown-shape' },
+      productInfo: { fullTitle: 'Nike Mind 001', url: '/jp/t/mind-001-current/HQ4307-200' },
+    },
+    {
+      styleColor: 'HQ4307-300', pdpUrl: { trackingId: 'unknown-shape' },
+      productInfo: { fullTitle: 'Nike Mind 001' },
+    },
+  ] } } };
+  const html = `<script id="__NEXT_DATA__">${JSON.stringify(payload)}</script>
+    <a href="/jp/t/mind-001-current/HQ4307-300">Mind 001</a>`;
+  assert.deepEqual(extractNikeMind001Products(html), ['HQ4307-200', 'HQ4307-300'].map((styleColor) => ({
+    styleColor, url: `https://www.nike.com/jp/t/mind-001-current/${styleColor}`,
+  })));
+});
+
 test('探索失敗時も例外を投げず既知商品の監視を継続できる', async () => {
   const result = await discoverNikeMind001Products({
     fetchImpl: async () => { throw new Error('blocked'); },

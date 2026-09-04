@@ -1,0 +1,43 @@
+name: Transfer monitor directly to Cloudflare
+
+on:
+  workflow_dispatch:
+    inputs:
+      cache_key:
+        description: Exact final cache key (leave empty for a validation transfer)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Restore saved monitor state
+        id: monitor-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: .monitor-state
+          key: ${{ inputs.cache_key || format('nike-monitor-state-{0}', github.run_id) }}
+          restore-keys: ${{ inputs.cache_key == '' && 'nike-monitor-state-' || '' }}
+          fail-on-cache-miss: true
+      - name: Verify the final state cache matches exactly
+        if: inputs.cache_key != '' && steps.monitor-cache.outputs.cache-hit != 'true'
+        run: |
+          echo 'The requested final monitor cache was not restored exactly.' >&2
+          exit 1
+      - name: Transfer directly to the authorized Cloudflare Worker
+        env:
+          MIGRATION_PUBLIC_KEY: ${{ vars.CLOUDFLARE_MIGRATION_PUBLIC_KEY }}
+          REPOSITORY_VARIABLES: ${{ toJSON(vars) }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: node scripts/transfer-cloudflare-state.js

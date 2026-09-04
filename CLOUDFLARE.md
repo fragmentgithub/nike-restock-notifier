@@ -2,7 +2,7 @@
 
 移行先: https://nike-restock-notifier.only-this-moment.workers.dev/
 
-2026-09-04時点では移行準備中です。Cloudflareは一時停止状態から開始し、現在のGitHub監視を止める前に、管理キー登録・Nike接続検証を完了させます。
+2026-09-05時点では移行準備中で、GitHubの本番監視を継続しています。Cloudflareへの管理キー・既存Discord Webhookの登録はユーザー承認済みで、管理キーの登録が完了しています。Nikeへの接続確認と、最新状態・Webhookの引き継ぎ後に本番を切り替えます。
 
 ## 構成
 
@@ -44,14 +44,17 @@
 ## 移行と切り戻し
 
 1. `npm run cloudflare:build`、`npm test` を実行し、`npm run cloudflare:deploy` で一時停止状態のCloudflare版を公開します。
-2. 移行先へ専用 `ADMIN_TOKEN` を登録し、`node scripts/cloudflare-admin.js probe mind`、`probe fragment`、`probe catalog` で商品・発売ページ・探索を検証します。
-3. `node scripts/prepare-cloudflare-key.js` で暗号化用鍵を作ります。公開鍵 `.cloudflare-migration/export-public.pem` だけをGitHub variable `CLOUDFLARE_MIGRATION_PUBLIC_KEY` に登録します。秘密鍵はこの端末から出しません。
-4. 手動workflow `cloudflare-export.yml` を実行します。最新のActions cache、通常設定、暗号化したWebhookを `cloudflare-export-実行ID` artifactとして取得します。暗号化Webhookは `node scripts/import-cloudflare-webhook.js ダウンロード先` で復号し、平文ファイルやコマンド引数を経由せずWorkers Secretへ登録します。
-5. `node scripts/cloudflare-admin.js import ダウンロード先` で状態を引き継ぎ、`node scripts/cloudflare-admin.js mode shadow` で通知なしの検証を行います。
-6. GitHubの `pages.yml` と `health.yml` を一時的に無効化します。監視の待機実行を取り消し、進行中の実行は最後の状態保存まで完了させます。自己連鎖で追加された待機実行も残っていないことを確認します。
-7. Cloudflareを `mode paused` に戻します。GitHub監視がすべて終了した後で再度exportし、**最後の状態**をimportします。公開 `status.json` だけでは通知済み状態は復元できません。
-8. `mode active` でCloudflare通知を有効化し、更新・取得結果を確認します。GitHub variable `MONITOR_BACKEND=cloudflare` を設定し、`pages.yml` を1回実行して旧URLを移転案内にします。旧監視workflowはその後無効化できます。
-9. `health.yml` を再有効化します。これはCloudflareの更新停止を外側から検知する役割だけになり、旧GitHub監視を再起動しません。ソースコードとCIもGitHubに残します。
+2. 移行先へ専用 `ADMIN_TOKEN` を登録し、`node scripts/cloudflare-admin.js probe mind`、`probe fragment`、`probe catalog` で商品・発売ページ・探索を検証します。固定の商品URLが404の場合は、探索で見つかった現行商品でも確認します。
+3. 暗号化用鍵が未作成なら `node scripts/prepare-cloudflare-key.js` で作ります。公開鍵 `.cloudflare-migration/export-public.pem` だけをGitHub variable `CLOUDFLARE_MIGRATION_PUBLIC_KEY` に登録します。秘密鍵はこの端末に保管し、作成済みの鍵は引き続き使います。
+4. Cloudflareを `mode paused` にし、`main` の手動workflow `cloudflare-transfer.yml` を実行します。検証時は `cache_key` を空にすると最新のActions cacheを復元します。監視状態・通常設定・暗号化したWebhookを、GitHubから承認済みのCloudflareへ直接送信します。
+5. ローカルに `.cloudflare-migration/credential/` を作成し、`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で暗号文を取得します。`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` で復号してWorkers Secretに登録し、成功後に `node scripts/cloudflare-admin.js clear-credential` でCloudflareに一時保存した暗号文を削除します。Webhookの平文はファイル・コマンド引数・ログへ出しません。
+6. `node scripts/cloudflare-admin.js mode shadow` で、通知なしの監視を検証します。
+7. GitHubの `health.yml` と `pages.yml` を一時的に無効化します。監視の未開始の待機実行を取り消し、進行中の実行は最後の状態保存まで完了させます。保存の成功、対応するキャッシュの存在、監視実行が残っていないことを確認します。
+8. Cloudflareを `mode paused` に戻します。`cloudflare-transfer.yml` の `cache_key` に、最後の監視実行が保存した正確なキー `nike-monitor-state-実行ID` を指定して再送信します。復元ログでそのキーとの一致を確認してください。**最後の通知済み状態**が反映されたことを確認し、再送されたWebhookの暗号文は `clear-credential` で削除します。公開 `status.json` だけでは通知済み状態は復元できません。
+9. `mode active` でCloudflare通知を有効化し、更新・取得結果を確認します。GitHub variable `MONITOR_BACKEND=cloudflare` を設定し、`pages.yml` を再有効化して1回実行し、旧URLを移転案内にします。旧監視workflowはその後無効化できます。
+10. `health.yml` を再有効化します。これはCloudflareの更新停止を外側から検知する役割だけになり、旧GitHub監視を再起動しません。ソースコードとCIもGitHubに残します。
+
+直接転送の送信先は `/migration/transfer` です。CloudflareはGitHub OIDCで発行元、送信先、リポジトリと所有者のID、`main`、指定の手動workflowを検証します。この転送のためにCloudflareの管理キーをGitHubへ登録する必要はありません。転送データはGitHub artifactには保存しません。
 
 切り戻す場合は、Cloudflare を一時停止してから GitHub の監視を再開します。古い状態のまま再開すると、移行後に通知済みの在庫が再通知される可能性があるため、最新の通知済み状態を引き継いでください。
 
@@ -67,7 +70,7 @@ node scripts/cloudflare-admin.js mode active
 node scripts/cloudflare-admin.js state .cloudflare-migration/state-backup.json
 ```
 
-`paused` の応答は実行中の確認・通知が終了してから返ります。状態のimportはpausedでのみ受け付け、同じmigrationIdの再送は重ねて適用しません。通知は外部サービスへの送信と保存を単一の取引にできないため、送信成功直後の障害などで重複する余地はあります。
+`paused` の応答は実行中の確認・通知が終了してから返ります。状態のimportと直接転送はpausedでのみ受け付け、同じmigrationIdの再送は重ねて適用しません。通知は外部サービスへの送信と保存を単一の取引にできないため、送信成功直後の障害などで重複する余地はあります。
 
 5分ごとのCronは次回alarmが失われた場合の復旧用です。在庫確認の通常間隔はalarmが管理します。無料枠には実行・読み書きの上限があるため、移行後に実使用量を確認します。
 

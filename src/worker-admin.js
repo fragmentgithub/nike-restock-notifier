@@ -1,5 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { scrubDiscordWebhook } from './discord.js';
+import { verifyGitHubOidc } from './github-oidc.js';
 
 export const MAX_ADMIN_BYTES = 12 * 1024 * 1024;
 export const MONITOR_MODES = new Set(['paused', 'shadow', 'active']);
@@ -13,6 +14,7 @@ export const CONFIG_KEYS = new Set([
 const PRIVATE_KEYS = new Set([
   'webhook', 'discordwebhook', 'discord_webhook', 'admintoken', 'admin_token',
   'authorization', 'token', '__proto__', 'constructor', 'prototype',
+  'encryptedwebhook',
 ]);
 
 export function selectConfig(input = {}) {
@@ -49,6 +51,7 @@ export function validateImport(payload) {
     return 'Configuration must contain supported string settings only.';
   }
   if (payload.webhook !== undefined) return 'Configure Discord through the Worker secret binding.';
+  if (payload.encryptedWebhook !== undefined) return 'Use the authenticated migration transfer endpoint.';
   if (payload.migrationId !== undefined &&
       (typeof payload.migrationId !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(payload.migrationId))) {
     return 'migrationId is invalid.';
@@ -62,6 +65,29 @@ export function validateImport(payload) {
       for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
     }
   }
+  return null;
+}
+
+export function validateMigrationTransfer(payload, identity) {
+  if (!isRecord(payload)) return 'A migration object is required.';
+  const { encryptedWebhook, ...importPayload } = payload;
+  const error = validateImport(importPayload);
+  if (error) return error;
+  if (!identity || payload.migrationId !== identity.migrationId ||
+      identity.migrationId !== `${identity.runId}:${identity.runAttempt}` ||
+      !/^[1-9][0-9]{0,29}$/.test(identity.runId) || !/^[1-9][0-9]{0,7}$/.test(identity.runAttempt)) {
+    return 'Migration identity does not match the authenticated run.';
+  }
+  if (typeof encryptedWebhook !== 'string' || encryptedWebhook.length < 344 || encryptedWebhook.length > 1368 ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encryptedWebhook)) {
+    return 'Encrypted credential is invalid.';
+  }
+  try {
+    const bytes = atob(encryptedWebhook);
+    if (![256, 384, 512, 768, 1024].includes(bytes.length) || btoa(bytes) !== encryptedWebhook) {
+      return 'Encrypted credential is invalid.';
+    }
+  } catch { return 'Encrypted credential is invalid.'; }
   return null;
 }
 
@@ -81,17 +107,36 @@ export async function authorized(request, token) {
 export async function handleWorkerRequest(request, env) {
   const path = new URL(request.url).pathname;
   try {
+    if (path === '/migration/transfer') {
+      if (request.method !== 'POST') return methodNotAllowed('POST');
+      const header = request.headers.get('authorization') || '';
+      const identity = header.startsWith('Bearer ') ? await verifyGitHubOidc(header.slice(7)) : null;
+      if (!identity) return json({ error: 'Unauthorized' }, 401);
+      const payload = await readJson(request);
+      const error = validateMigrationTransfer(payload, identity);
+      if (error) return json({ error }, 400);
+      const result = await env.MONITOR.getByName('nike-jp').acceptMigration(payload, identity);
+      return json(result, result?.ok === false ? result.status || 400 : 200);
+    }
     if (path.startsWith('/admin/')) {
       if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'Unauthorized' }, 401);
       const methods = {
         '/admin/state': 'GET', '/admin/health': 'GET', '/admin/import': 'POST',
         '/admin/mode': 'POST', '/admin/probe': 'POST',
+        '/admin/migration-credential': ['GET', 'DELETE'],
       };
       if (!methods[path]) return json({ error: 'Not found' }, 404);
-      if (request.method !== methods[path]) return methodNotAllowed(methods[path]);
+      const allowed = [].concat(methods[path]);
+      if (!allowed.includes(request.method)) return methodNotAllowed(allowed.join(', '));
       const monitor = env.MONITOR.getByName('nike-jp');
       if (path === '/admin/state') return json(await monitor.exportState());
       if (path === '/admin/health') return json(await monitor.health());
+      if (path === '/admin/migration-credential') {
+        const result = request.method === 'GET'
+          ? await monitor.migrationCredential()
+          : await monitor.deleteMigrationCredential(new URL(request.url).searchParams.get('migrationId'));
+        return json(result, result?.ok === false ? result.status || 400 : 200);
+      }
       const payload = await readJson(request);
       let result;
       if (path === '/admin/import') {

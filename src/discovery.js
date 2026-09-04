@@ -239,11 +239,11 @@ function collectProductsFromValue(value, found, sourceUrl, excludedStyleColors) 
     value.fullTitle,
     value.labelName,
     value.slug,
-    value.pdpUrl,
-    value.url,
+    ...productUrlCandidates(value.pdpUrl),
+    ...productUrlCandidates(value.url),
     value.productInfo?.title,
     value.productInfo?.fullTitle,
-    value.productInfo?.url,
+    ...productUrlCandidates(value.productInfo?.url),
     value.productContent?.title,
     value.productContent?.fullTitle,
     value.merchProduct?.labelName,
@@ -255,12 +255,12 @@ function collectProductsFromValue(value, found, sourceUrl, excludedStyleColors) 
     const product = {
       styleColor,
       contextText,
-      url: firstPresent([
+      url: normalizeNikeProductUrl([
         value.pdpUrl,
         value.url,
         value.productInfo?.url,
         value.productContent?.url,
-      ]),
+      ], { styleColor, sourceUrl }),
     };
     if (isWomensNikeProduct(product)) {
       excludedStyleColors.add(String(styleColor).toUpperCase());
@@ -281,6 +281,7 @@ function addProduct(found, product, sourceUrl) {
   if (isWomensNikeProduct({ ...product, styleColor })) return;
 
   const url = productUrl(product.url, styleColor, sourceUrl);
+  if (!url) return;
   const previous = found.get(styleColor);
   found.set(styleColor, {
     styleColor,
@@ -289,17 +290,48 @@ function addProduct(found, product, sourceUrl) {
 }
 
 function productUrl(value, styleColor, sourceUrl) {
-  try {
-    const url = new URL(value || `/jp/t/nike-mind-001/${styleColor}`, sourceUrl);
-    if (!url.pathname.toUpperCase().includes(styleColor)) {
-      url.pathname = `${url.pathname.replace(/\/$/, '')}/${styleColor}`;
+  return normalizeNikeProductUrl(value, { styleColor, sourceUrl });
+}
+
+// Nike sometimes represents URL fields as structured link objects. Never coerce
+// those objects into "[object Object]" or let an unusable first candidate hide a
+// later canonical product link.
+export function normalizeNikeProductUrl(value, {
+  styleColor = '', sourceUrl = 'https://www.nike.com/',
+} = {}) {
+  const normalizedStyle = String(styleColor || '').toUpperCase();
+  for (const candidate of productUrlCandidates(value)) {
+    try {
+      const url = new URL(candidate, sourceUrl);
+      if (url.hostname === 'nike.com') url.hostname = 'www.nike.com';
+      if (url.protocol !== 'https:' || url.hostname !== 'www.nike.com' ||
+          url.username || url.password || url.port) continue;
+      const path = decodeURIComponent(url.pathname);
+      if (/\[object\s/i.test(path) || !/\/(?:launch\/)?t\/[^/]+/i.test(path)) continue;
+      const pathStyle = url.pathname.match(/\/([A-Z0-9]{5,8}-[A-Z0-9]{3})\/?$/i)?.[1]?.toUpperCase();
+      if (pathStyle && !/\/t\/[^/]+/i.test(url.pathname.replace(/\/[^/]+\/?$/, ''))) continue;
+      if (normalizedStyle) {
+        if (!STYLE_COLOR_PATTERN.test(normalizedStyle)) continue;
+        if (pathStyle && pathStyle !== normalizedStyle) continue;
+        if (!pathStyle) url.pathname = `${url.pathname.replace(/\/$/, '')}/${normalizedStyle}`;
+      }
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      // Unsupported URL objects and malformed links are not usable product URLs.
     }
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return `https://www.nike.com/jp/t/nike-mind-001/${styleColor}`;
   }
+  return '';
+}
+
+function productUrlCandidates(value, depth = 0) {
+  if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+  if (!value || typeof value !== 'object' || depth > 3) return [];
+  const candidates = Array.isArray(value)
+    ? value
+    : [value.pdpUrl, value.url, value.href, value.path, value.canonicalUrl];
+  return candidates.flatMap((item) => productUrlCandidates(item, depth + 1));
 }
 
 function normalizeEscapedHtml(value) {

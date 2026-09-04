@@ -44,11 +44,76 @@ function fixture(t, { engineFactory, env = {}, probe } = {}) {
 test('all admin routes fail closed without the configured secret or with a wrong token', async () => {
   let calls = 0;
   const env = { MONITOR: { getByName: () => { calls++; } } };
-  for (const path of ['/admin/state', '/admin/health', '/admin/import', '/admin/mode', '/admin/probe']) {
+  for (const path of ['/admin/state', '/admin/health', '/admin/import', '/admin/mode', '/admin/probe', '/admin/migration-credential']) {
     assert.equal((await handleWorkerRequest(request(path), env)).status, 401);
     assert.equal((await handleWorkerRequest(request(path, { token: 'wrong' }), { ...env, ADMIN_TOKEN })).status, 401);
   }
   assert.equal(calls, 0);
+});
+
+test('migration transfer rejects an admin credential and unsigned tokens before reading or importing data', async () => {
+  let calls = 0;
+  const env = { ADMIN_TOKEN, MONITOR: { getByName: () => { calls++; } } };
+  for (const token of [ADMIN_TOKEN, 'not.a.jwt', '']) {
+    const response = await handleWorkerRequest(request('/migration/transfer', {
+      method: 'POST', token, payload: { state: {} },
+    }), env);
+    assert.equal(response.status, 401);
+  }
+  assert.equal(calls, 0);
+});
+
+test('migration commits state and ciphertext privately, binds run identity and rejects old-run replays', async (t) => {
+  const { controller, bindings } = fixture(t);
+  const encryptedWebhook = Buffer.alloc(384, 97).toString('base64');
+  const identity = { runId: '33895000001', runAttempt: '1', migrationId: '33895000001:1' };
+  const payload = { state: { marker: 'first',
+    discoveryCycle: { index: 1 }, lastDiscoveryAt: '2026-09-04T00:00:00.000Z',
+    lastDiscoverySuccessAt: '2026-09-04T00:00:00.000Z', lastDiscoveryAttemptAt: '2026-09-04T00:00:00.000Z',
+  }, vars: { INTERVAL_SECONDS: '180' }, migrationId: identity.migrationId, encryptedWebhook };
+  assert.equal((await controller.acceptMigration({ ...payload, migrationId: 'different' }, identity)).status, 400);
+  assert.equal((await controller.acceptMigration(payload, identity)).imported, true);
+  assert.equal((await controller.exportState()).state.marker, 'first');
+  for (const key of ['discoveryCycle', 'lastDiscoveryAt', 'lastDiscoverySuccessAt', 'lastDiscoveryAttemptAt']) {
+    assert.equal((await controller.exportState()).state[key], undefined);
+  }
+  for (const output of [await controller.exportState(), await controller.getStatus(), await controller.health()]) {
+    assert.equal(JSON.stringify(output).includes(encryptedWebhook), false);
+  }
+  const credential = await handleWorkerRequest(request('/admin/migration-credential'), bindings);
+  assert.equal(credential.status, 200);
+  assert.deepEqual(await credential.json(), { migrationId: identity.migrationId, encryptedWebhook });
+  assert.equal((await controller.acceptMigration({ ...payload, state: { marker: 'replayed' } }, identity)).imported, false);
+  assert.equal((await controller.exportState()).state.marker, 'first');
+  const retry = { runId: identity.runId, runAttempt: '2', migrationId: `${identity.runId}:2` };
+  assert.equal((await controller.acceptMigration({ ...payload, migrationId: retry.migrationId, state: { marker: 'retry' } }, retry)).imported, true);
+  assert.equal((await controller.acceptMigration(payload, identity)).status, 409);
+  assert.equal((await controller.deleteMigrationCredential(identity.migrationId)).status, 409);
+  assert.equal((await controller.deleteMigrationCredential(retry.migrationId)).deleted, true);
+  assert.equal((await controller.migrationCredential()).status, 404);
+  assert.equal((await controller.acceptMigration({ ...payload, migrationId: retry.migrationId }, retry)).imported, false);
+  assert.equal((await controller.migrationCredential()).status, 404);
+  await controller.setMode('shadow');
+  assert.equal((await controller.acceptMigration(payload, identity)).status, 409);
+});
+
+test('migration ciphertext and state roll back atomically on a database failure', async (t) => {
+  const { controller, storage } = fixture(t);
+  await controller.importState({ state: { marker: 'before' } });
+  const exec = storage.sql.exec;
+  storage.sql.exec = (query, ...args) => {
+    if (query.startsWith('INSERT INTO monitor_documents') && args[0] === 'migration-credential') {
+      throw new Error('storage failure');
+    }
+    return exec(query, ...args);
+  };
+  const identity = { runId: '33895000001', runAttempt: '1', migrationId: '33895000001:1' };
+  await assert.rejects(controller.acceptMigration({
+    state: { marker: 'after' }, migrationId: identity.migrationId,
+    encryptedWebhook: Buffer.alloc(384, 97).toString('base64'),
+  }, identity), /storage failure/);
+  assert.equal((await controller.exportState()).state.marker, 'before');
+  assert.equal((await controller.migrationCredential()).status, 404);
 });
 
 test('HTTP method, JSON format and request size are enforced before invoking mutations', async (t) => {

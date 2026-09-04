@@ -364,6 +364,68 @@ test('legacy state and ten thousand quality samples survive while women products
   assert.equal(status.schemaVersion, 3);
 });
 
+test('initial seeds retain imported canonical URLs while fresh catalog results may update them', async () => {
+  const timestamp = Date.now();
+  const canonicalUrl = `https://www.nike.com/jp/t/mind-001-current/${TARGET}`;
+  const env = environment([]);
+  const imported = createMonitorEngine({ env, state: cache(timestamp, {
+    url: canonicalUrl, source: 'catalog', lastStockKey: '27',
+  }), now: () => timestamp });
+  assert.equal(imported.snapshot().knownProducts[TARGET].url, canonicalUrl);
+  const state = imported.snapshot();
+  delete state.lastDiscoverySuccessAt;
+  delete state.lastDiscoveryAt;
+  const updatedPath = `/jp/t/mind-001-updated/${TARGET}`;
+  const refreshed = createMonitorEngine({ env, state, now: () => timestamp,
+    fetchImpl: async () => new Response(`<a href="${updatedPath}">Mind 001</a>`),
+  });
+  await refreshed.tick();
+  assert.equal(refreshed.snapshot().knownProducts[TARGET].url, `https://www.nike.com${updatedPath}`);
+  assert.equal(refreshed.snapshot().knownProducts[TARGET].lastStockKey, '27');
+  const restarted = createMonitorEngine({ env, state: refreshed.snapshot(), now: () => timestamp });
+  assert.equal(restarted.snapshot().knownProducts[TARGET].url, `https://www.nike.com${updatedPath}`);
+});
+
+test('an initial seed can repair a malformed imported URL without dropping notification state', () => {
+  const timestamp = Date.now();
+  const engine = createMonitorEngine({ state: cache(timestamp, {
+    url: `https://www.nike.com/jp/t/[object%20Object]/${TARGET}`, lastStockKey: '27',
+  }), now: () => timestamp });
+  const entry = engine.snapshot().knownProducts[TARGET];
+  assert.equal(entry.url, DEFAULT_MIND_001_URLS.find((url) => url.endsWith(`/${TARGET}`)));
+  assert.equal(entry.lastStockKey, '27');
+});
+
+test('legacy object-path repair retains a pause until authoritative rediscovery schedules a probe', async () => {
+  const timestamp = Date.now();
+  const target = 'HQ4307-300';
+  const canonical = `https://www.nike.com/jp/t/mind-001-current/${target}`;
+  const env = environment([target]);
+  const state = {
+    knownProducts: { [target]: {
+      styleColor: target,
+      url: `https://www.nike.com/jp/t/mind-001-current/[object%20Object]/${target}`,
+      lastStockKey: '27', pausedAt: iso(timestamp), pausedReason: 'unreachable',
+      catalogPresent: true, lastSeenAt: iso(timestamp),
+    } },
+  };
+  const engine = createMonitorEngine({ env, state, now: () => timestamp,
+    fetchImpl: async () => new Response(`<a href="${canonical}">Mind 001</a>`),
+  });
+  let entry = engine.snapshot().knownProducts[target];
+  assert.equal(entry.url, canonical);
+  assert.equal(entry.pausedAt, iso(timestamp));
+  assert.equal(entry.catalogReprobePending, false);
+  assert.equal(entry.urlRepairPending, true);
+  assert.equal((await engine.tick()).kind, 'discovery');
+  entry = engine.snapshot().knownProducts[target];
+  assert.equal(entry.lastStockKey, '27');
+  assert.equal(entry.pausedAt, iso(timestamp));
+  assert.equal(entry.catalogReprobePending, true);
+  assert.equal(entry.lastSeenAt, null);
+  assert.equal(entry.urlRepairPending, false);
+});
+
 test('response size limit rejects an oversized body before parsing and fails closed', async () => {
   const timestamp = Date.now();
   let requests = 0;

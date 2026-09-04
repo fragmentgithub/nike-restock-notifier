@@ -14,6 +14,9 @@ export class NikeMonitor extends DurableObject {
   health() { return this.monitor.health(); }
   exportState() { return this.monitor.exportState(); }
   importState(payload) { return this.monitor.importState(payload); }
+  acceptMigration(payload, identity) { return this.monitor.acceptMigration(payload, identity); }
+  migrationCredential() { return this.monitor.migrationCredential(); }
+  deleteMigrationCredential(migrationId) { return this.monitor.deleteMigrationCredential(migrationId); }
   setMode(mode) { return this.monitor.setMode(mode); }
   probe(target) { return this.monitor.probe(target); }
   alarm() { return this.monitor.alarm(); }
