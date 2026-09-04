@@ -7,7 +7,7 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  id-token: write
 
 concurrency:
   group: monitor-health-watchdog
@@ -27,15 +27,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Recover stale monitor workflow
-        if: vars.MONITOR_BACKEND != 'cloudflare'
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          MONITOR_REF: main
-          MONITOR_WAITING_STALE_MINUTES: ${{ vars.MONITOR_WAITING_STALE_MINUTES }}
-        run: node scripts/recover-monitor.js
-
       - name: Restore health state
         uses: actions/cache/restore@v6
         with:
@@ -46,7 +37,7 @@ jobs:
 
       - name: Check monitor freshness
         env:
-          STATUS_URL: ${{ vars.MONITOR_BACKEND == 'cloudflare' && 'https://nike-restock-notifier.only-this-moment.workers.dev/status.json' || vars.STATUS_URL }}
+          STATUS_URL: https://nike-restock-notifier.only-this-moment.workers.dev/healthz
           HEALTH_STALE_MINUTES: ${{ vars.HEALTH_STALE_MINUTES }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/check-health.js

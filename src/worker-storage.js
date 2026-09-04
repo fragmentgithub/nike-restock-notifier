@@ -16,14 +16,24 @@ export class MonitorStorage {
     )`);
     this.sampleRows = null;
     this.sampleBlocks = null;
+    this.sampleGroups = null;
+    this.documentChunks = new Map();
+  }
+
+  documentRows(name) {
+    if (!this.documentChunks.has(name)) {
+      const rows = this.sql.exec(
+        'SELECT part, value FROM monitor_documents WHERE name = ? ORDER BY part', name,
+      ).toArray();
+      if (rows.some((row, index) => row.part !== index)) throw new Error('Incomplete monitor state');
+      this.documentChunks.set(name, rows);
+    }
+    return this.documentChunks.get(name);
   }
 
   read(name, fallback = null) {
-    const rows = this.sql.exec(
-      'SELECT part, value FROM monitor_documents WHERE name = ? ORDER BY part', name,
-    ).toArray();
+    const rows = this.documentRows(name);
     if (!rows.length) return structuredClone(fallback);
-    if (rows.some((row, index) => row.part !== index)) throw new Error('Incomplete monitor state');
     const value = JSON.parse(rows.map((row) => row.value).join(''));
     if (name === 'state' && value?.checkSamples?.storage === SAMPLE_TABLE_MARKER) {
       value.checkSamples = [...this.samples().values()]
@@ -54,6 +64,7 @@ export class MonitorStorage {
           this.sampleRows.set(key, { sample_key: key, position, value });
         }
       }
+      this.sampleGroups = groupSamples(this.sampleRows);
     }
     return this.sampleRows;
   }
@@ -73,7 +84,9 @@ export class MonitorStorage {
       if (text === undefined) throw new TypeError('Monitor documents must be JSON values');
       return [name, text];
     });
-    const nextBlocks = nextSamples ? this.prepareSampleBlocks(nextSamples) : null;
+    const prepared = nextSamples ? this.prepareSampleBlocks(nextSamples) : null;
+    const nextBlocks = prepared?.blocks;
+    const nextDocuments = new Map();
     this.storage.transactionSync(() => {
       if (nextSamples) {
         for (const [key, row] of nextBlocks) {
@@ -89,21 +102,30 @@ export class MonitorStorage {
         }
       }
       for (const [name, text] of serialized) {
-        const previous = this.sql.exec(
-          'SELECT part, value FROM monitor_documents WHERE name = ? ORDER BY part', name,
-        ).toArray();
+        const previous = this.documentRows(name);
+        const nextRows = [];
         let part = 0;
         for (const value of jsonChunks(text)) {
           if (previous[part]?.part !== part || previous[part]?.value !== value) {
             this.sql.exec(`INSERT INTO monitor_documents (name, part, value) VALUES (?, ?, ?)
               ON CONFLICT(name, part) DO UPDATE SET value = excluded.value`, name, part, value);
           }
+          nextRows.push({ part, value });
           part += 1;
         }
-        this.sql.exec('DELETE FROM monitor_documents WHERE name = ? AND part >= ?', name, part);
+        if (previous.length > part) {
+          this.sql.exec('DELETE FROM monitor_documents WHERE name = ? AND part >= ?', name, part);
+        }
+        nextDocuments.set(name, nextRows);
       }
     });
-    if (nextSamples) { this.sampleRows = nextSamples; this.sampleBlocks = nextBlocks; }
+    // Publish caches only after the whole transaction succeeds, including status.
+    for (const [name, rows] of nextDocuments) this.documentChunks.set(name, rows);
+    if (nextSamples) {
+      this.sampleRows = nextSamples;
+      this.sampleBlocks = nextBlocks;
+      this.sampleGroups = prepared.groups;
+    }
   }
 
   prepareSamples(samples) {
@@ -118,31 +140,33 @@ export class MonitorStorage {
       const occurrence = occurrences.get(value) || 0;
       occurrences.set(value, occurrence + 1);
       const key = `${value}:${occurrence}`;
-      const existingPosition = previous.get(key)?.position;
+      const existing = previous.get(key);
+      const existingPosition = existing?.position;
       // Normal ring-buffer shifts retain all existing positions. Reordered imports
       // receive new monotonic positions so exported order remains exactly faithful.
       position = existingPosition !== undefined && existingPosition > position
         ? existingPosition : ++maximumPosition;
-      next.set(key, { sample_key: key, position, value });
+      next.set(key, existing?.position === position ? existing : { sample_key: key, position, value });
     }
     return next;
   }
 
   prepareSampleBlocks(samples) {
-    const grouped = new Map();
-    for (const row of samples.values()) {
-      const block = Math.floor(row.position / 128);
-      const entries = grouped.get(block) || [];
-      entries.push([row.sample_key, row.position, row.value]);
-      grouped.set(block, entries);
-    }
-    const next = new Map();
+    const grouped = groupSamples(samples);
+    const next = new Map(this.sampleBlocks);
+    for (const [key, row] of next) if (!grouped.has(row.block)) next.delete(key);
     for (const [block, entries] of grouped) {
-      jsonChunks(JSON.stringify(entries)).forEach((value, part) => {
+      const previous = this.sampleGroups.get(block);
+      if (previous?.length === entries.length && entries.every((entry, index) => entry === previous[index])) continue;
+      // Most of the full history is unchanged: serialize only the blocks affected
+      // by append/prune, retaining their already encoded neighbors verbatim.
+      for (const [key, row] of next) if (row.block === block) next.delete(key);
+      const records = entries.map((row) => [row.sample_key, row.position, row.value]);
+      jsonChunks(JSON.stringify(records)).forEach((value, part) => {
         next.set(`${block}:${part}`, { block, part, value });
       });
     }
-    return next;
+    return { blocks: next, groups: grouped };
   }
 
   async commit(documents) {
@@ -150,6 +174,17 @@ export class MonitorStorage {
     // Explicitly commit before a subsequent Discord request is allowed to start.
     await this.storage.sync();
   }
+}
+
+function groupSamples(samples) {
+  const grouped = new Map();
+  for (const row of samples.values()) {
+    const block = Math.floor(row.position / 128);
+    const entries = grouped.get(block) || [];
+    entries.push(row);
+    grouped.set(block, entries);
+  }
+  return grouped;
 }
 
 function jsonChunks(text) {

@@ -253,6 +253,19 @@ test('探索失敗時も例外を投げず既知商品の監視を継続でき�
   assert.equal(result.error, 'blocked');
 });
 
+test('探索HTTPエラーの未使用本文を破棄する', async () => {
+  let cancelled = 0;
+  const fetchImpl = async () => new Response(new ReadableStream({
+    cancel() { cancelled += 1; },
+  }), { status: 503 });
+  await discoverNikeMind001Products({ fetchImpl });
+  await discoverNikeFragmentProducts({
+    fetchImpl,
+    catalogUrls: ['https://www.nike.com/jp/launch'],
+  });
+  assert.equal(cancelled, 2);
+});
+
 test('HTTP成功でも商品が0件なら探索異常として扱う', async () => {
   const result = await discoverNikeMind001Products({
     fetchImpl: async () => new Response('<html><body>No products</body></html>'),

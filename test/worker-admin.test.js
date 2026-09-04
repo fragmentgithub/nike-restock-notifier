@@ -258,14 +258,23 @@ test('secret values and secret-shaped fields never appear in exports, public sta
   assert.equal((await failed.text()).includes('secret'), false);
 });
 
-test('static assets bypass the monitor and public status cannot be cached', async (t) => {
+test('pages, assets, status and health are unavailable without authorization', async (t) => {
   const { bindings } = fixture(t);
   const status = await handleWorkerRequest(request('/status.json', { token: '' }), bindings);
-  assert.equal(status.status, 200);
+  assert.equal(status.status, 401);
   assert.equal(status.headers.get('cache-control'), 'no-store');
-  const assets = await handleWorkerRequest(request('/app.js'), {
-    MONITOR: { getByName: () => { throw new Error('must not enter monitor'); } },
-    ASSETS: { fetch: async () => new Response('asset') },
-  });
-  assert.equal(await assets.text(), 'asset');
+  assert.equal((await handleWorkerRequest(request('/healthz', { token: '' }), bindings)).status, 401);
+  for (const path of ['/', '/index.html', '/app.js', '/styles.css', '/other']) {
+    const response = await handleWorkerRequest(request(path), {
+      MONITOR: { getByName: () => { throw new Error('must not enter monitor'); } },
+      ASSETS: { fetch: async () => { throw new Error('must not serve assets'); } },
+    });
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.get('x-robots-tag'), 'noindex, nofollow');
+  }
+  const authenticated = await handleWorkerRequest(request('/admin/status'), bindings);
+  assert.equal(authenticated.status, 200);
+  assert.equal(authenticated.headers.get('cache-control'), 'no-store');
+  assert.equal((await handleWorkerRequest(request('/status.json'), bindings)).status, 200);
+  assert.equal((await handleWorkerRequest(request('/healthz'), bindings)).status, 200);
 });

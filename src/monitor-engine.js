@@ -43,6 +43,7 @@ import {
 const MAX_EVENTS = 80;
 const MAX_HISTORY = 300;
 const MAX_CHECK_SAMPLES = 10000;
+const MAX_CATALOG_REPROBE_FAILURES = 3;
 
 /** One persisted alarm step. The caller owns alarm registration and enable/stop controls. */
 export function createMonitorEngine({
@@ -160,6 +161,7 @@ export function createMonitorEngine({
       if (error?.monitorPersistenceFailure) throw error;
       const checkedAt = new Date(clock()).toISOString();
       const safeError = new Error(scrubWebhook(error?.message || '監視処理でエラーが発生しました。'));
+      recordCatalogReprobeOutcome(entry, false);
       recordCheckSample(applyRuntimeFailure(entry, safeError, {
         checkedAt, durationMs: clock() - startedAt,
       }));
@@ -241,9 +243,9 @@ export function createMonitorEngine({
       `${item.family === 'mind' ? 'Mind 001' : 'Fragment'}: ${item.error}`);
     // Every configured page must succeed before absence is evidence of delisting.
     const completeDiscovery = completed && errors.length === 0;
-    const reprobe = updateCatalogPresence(trackedProducts(),
-      completeDiscovery ? [...DEFAULT_FRAGMENT_PRODUCTS, ...observed] : observed,
+    const reprobe = updateCatalogPresence(trackedProducts(), observed,
       checkedAt, { markAbsent: completeDiscovery });
+    for (const styleColor of reprobe) state.knownProducts[styleColor].catalogReprobeFailures = 0;
     if (reprobe.length) {
       pushEvent({
         id: `catalog-reprobe-${clock()}`, type: 'lifecycle',
@@ -291,7 +293,6 @@ export function createMonitorEngine({
       state.checkSamples = state.checkSamples.filter(
         (sample) => sample?.styleColor !== entry.styleColor,
       );
-      await persist(checkedAt);
       return { notified: false, ok: true };
     }
     const styleColor = result.product?.styleColor || entry.styleColor;
@@ -320,6 +321,7 @@ export function createMonitorEngine({
         result: null,
       });
     }
+    recordCatalogReprobeOutcome(entry, result.ok);
     const lifecycleTransition = updateDelistState(entry, result, {
       threshold: config.delistFailureThreshold,
       unreachableThreshold: config.delistFailureThreshold * 4,
@@ -377,9 +379,10 @@ export function createMonitorEngine({
     if (shouldNotify && settings.notify) {
       entry.pendingNotification = { stockKey: nextStockKey, detectedAt: checkedAt };
     }
-    // Commit the observation and pending candidate before any externally visible send.
-    await persist(checkedAt);
     if (shouldNotify && notificationEnabled) {
+      // Sending requires an observation checkpoint. Ordinary checks need only the
+      // final tick commit, which also saves failure state and the next schedule.
+      await persist(checkedAt);
       try {
         await sendDiscordNotification({
           webhook: config.discordWebhook,
@@ -437,8 +440,21 @@ export function createMonitorEngine({
       };
     }
 
-    await persist(checkedAt);
     return { notified, ok: result.ok };
+  }
+
+  function recordCatalogReprobeOutcome(entry, ok) {
+    if (ok) {
+      entry.catalogReprobeFailures = 0;
+      return;
+    }
+    if (!entry.pausedAt || !entry.catalogReprobePending) return;
+    entry.catalogReprobeFailures = (Number(entry.catalogReprobeFailures) || 0) + 1;
+    // A stale catalog entry must not bypass the paused interval indefinitely.
+    // Keep a short retry window for transient failures, then return to daily probes.
+    if (entry.catalogReprobeFailures >= MAX_CATALOG_REPROBE_FAILURES) {
+      entry.catalogReprobePending = false;
+    }
   }
 
   function addKnownProducts(products, source) {
@@ -465,14 +481,17 @@ export function createMonitorEngine({
     const existing = state.knownProducts[styleColor];
     if (existing) {
       const initialSeed = source === 'initial' || source === 'fragment-initial';
+      const urlChanged = existing.url !== parsed.url;
       if (product.url && (!initialSeed || !normalizeNikeProductUrl(existing.url, { styleColor }))) {
         existing.url = parsed.url;
       }
-      if (existing.urlRepairPending && (source === 'catalog' || source === 'fragment-catalog')) {
+      if ((existing.urlRepairPending || (existing.pausedAt && urlChanged)) &&
+          (source === 'catalog' || source === 'fragment-catalog')) {
         // A recovered path alone does not prove that a paused product is present.
         // Authoritative catalog rediscovery schedules a probe; only a successful
         // product check is allowed to clear the existing lifecycle pause.
         existing.catalogReprobePending = true;
+        existing.catalogReprobeFailures = 0;
         existing.lastSeenAt = null;
         existing.urlRepairPending = false;
       }
@@ -540,6 +559,7 @@ export function createMonitorEngine({
           catalogPresent: typeof product.catalogPresent === 'boolean' ? product.catalogPresent : undefined,
           lastCatalogSeenAt: product.lastCatalogSeenAt || null,
           catalogReprobePending: product.catalogReprobePending === true,
+          catalogReprobeFailures: Math.max(0, Number(product.catalogReprobeFailures) || 0),
           urlRepairPending: product.urlRepairPending === true || repair.detected,
           upcomingReleaseAt: product.upcomingReleaseAt || null,
           stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],

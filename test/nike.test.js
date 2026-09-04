@@ -6,6 +6,7 @@ import {
   parseNikeProductUrl,
   sizeMatches,
 } from '../src/nike.js';
+import { applyCheckState, notificationDecision } from '../src/monitor-state.js';
 
 const PRODUCT_URL = 'https://www.nike.com/jp/t/nike-mind-001/HQ4307-005';
 const FRAGMENT_LAUNCH_URL = 'https://www.nike.com/jp/launch/t/mind-001-fragment-black';
@@ -314,6 +315,103 @@ test('商品構造があっても別カラーのHTMLを指定カラーの在庫�
   assert.equal(result.ok, false);
   assert.equal(result.inStock, false);
   assert.match(result.errors[0], /商品データをページから読み取れませんでした/);
+});
+
+test('構造化商品情報からサイズ在庫が欠落しても通知済み在庫を消さない', async () => {
+  const entry = { lastStockKey: '27' };
+  for (let count = 0; count < 2; count += 1) {
+    const result = await checkWithNextData({ selectedProduct: product('HQ4307-005', { sizes: [] }) });
+    assert.equal(result.ok, true);
+    assert.equal(result.availabilityState, 'unknown');
+    const decision = notificationDecision(entry, result);
+    entry.lastResult = result;
+    applyCheckState(entry, result, { ...decision, notified: false, webhookConfigured: true });
+  }
+  assert.equal(entry.lastStockKey, '27');
+});
+
+test('未知のサイズ状態は売り切れとして確定しない', async () => {
+  const result = await checkWithNextData({
+    selectedProduct: product('HQ4307-005', { sizes: [size('27', 'RESERVED_FOR_LAUNCH')] }),
+  });
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.sizes[0].level, 'UNKNOWN');
+});
+
+test('一部サイズだけ不明になっても在庫構成の縮小を確定しない', async () => {
+  const result = await checkWithNextData({
+    selectedProduct: product('HQ4307-005', { sizes: [size('27', 'ACTIVE'), size('28', 'UNKNOWN')] }),
+  });
+  assert.equal(result.availabilityState, 'unknown');
+});
+
+test('全サイズ無効のHTMLでは購入ボタンの文言だけで在庫ありにしない', async () => {
+  const html = `<title>Nike Mind 001</title>
+    <div id="size-selector"><button disabled>27</button><button disabled>28</button></div>
+    <button>カートに追加</button>`;
+  const result = await checkWithResponses([new Response(html)]);
+  assert.equal(result.ok, true);
+  assert.equal(result.inStock, false);
+  assert.equal(result.availabilityState, 'out-of-stock');
+});
+
+test('HTMLのaria-disabled falseと一重引用符のサイズ選択欄を正しく読む', async () => {
+  const html = `<title>Nike Mind 001</title>
+    <div id='size-selector'><button aria-disabled="false">27</button><button aria-disabled="true">28</button></div>
+    <button>カートに追加</button>`;
+  const result = await checkWithResponses([new Response(html)]);
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.matchingSizes.map((size) => size.label), ['27']);
+});
+
+test('SNKRSの在庫情報欠落を売り切れと混同しない', async () => {
+  for (const skus of [undefined, [], [{ id: 'sku-27', nike_size: '27' }]]) {
+    const result = await checkWithSnkrsData({ isActive: true, skus });
+    assert.equal(result.availabilityState, 'unknown');
+  }
+});
+
+test('SNKRSの明示的なavailable falseは残ったHIGH表示より優先する', async () => {
+  const result = await checkWithSnkrsData({ isActive: true, skus: [snkrsSize('27', false, 'HIGH')] });
+  assert.equal(result.inStock, false);
+  assert.equal(result.availabilityState, 'out-of-stock');
+});
+
+test('API在庫一覧の欠落を売り切れと混同しない', async () => {
+  const result = await checkWithResponses([
+    new Response('blocked', { status: 403 }),
+    Response.json({ objects: [{ productInfo: [{
+      merchProduct: { styleColor: 'HQ4307-005' },
+      skus: [{ id: 'sku-27', localizedSize: '27' }],
+    }] }] }),
+  ]);
+  assert.equal(result.availabilityState, 'unknown');
+});
+
+test('APIの明示的なavailable falseは残ったHIGH表示より優先する', async () => {
+  const result = await checkWithResponses([
+    new Response('blocked', { status: 403 }),
+    Response.json({ objects: [{ productInfo: [{
+      merchProduct: { styleColor: 'HQ4307-005' },
+      skus: [{ id: 'sku-27', localizedSize: '27' }],
+      availableSkus: [{ skuId: 'sku-27', available: false, level: 'HIGH' }],
+    }] }] }),
+  ]);
+  assert.equal(result.inStock, false);
+  assert.equal(result.availabilityState, 'out-of-stock');
+});
+
+test('APIでも商品全体の在庫なし表示をSKUの残存在庫より優先する', async () => {
+  const result = await checkWithResponses([
+    new Response('blocked', { status: 403 }),
+    Response.json({ objects: [{ productInfo: [{
+      merchProduct: { styleColor: 'HQ4307-005', statusModifier: 'OUT_OF_STOCK_SEARCHABLE' },
+      skus: [{ id: 'sku-27', localizedSize: '27' }],
+      availableSkus: [{ skuId: 'sku-27', level: 'HIGH' }],
+    }] }] }),
+  ]);
+  assert.equal(result.inStock, false);
+  assert.equal(result.availabilityState, 'out-of-stock');
 });
 
 async function checkWithNextData(pageProps) {

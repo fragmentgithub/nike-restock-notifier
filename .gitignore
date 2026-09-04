@@ -1,6 +1,7 @@
 data/*.json
 .monitor-state/
 .health-state/
+/public/status.json
 node_modules/
 .wrangler/
 .cloudflare-migration/

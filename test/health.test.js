@@ -3,8 +3,23 @@ import assert from 'node:assert/strict';
 import {
   evaluateMonitorHealth,
   evaluateStatusFetchFailure,
+  evaluateWorkerHealth,
   shouldNotifyHealthTransition,
 } from '../src/health.js';
+
+test('private Worker health checks actual scheduling, notifications and mode without product data', () => {
+  const now = Date.parse('2026-09-05T00:00:00Z');
+  const healthy = { mode: 'active', webhookConfigured: true, healthy: true,
+    lastCompletedAt: new Date(now - 60000).toISOString(), nextAlarmAt: new Date(now + 60000).toISOString() };
+  assert.equal(evaluateWorkerHealth(healthy, { now }).healthy, true);
+  for (const override of [{ mode: 'paused' }, { mode: 'shadow' }, { webhookConfigured: false },
+    { healthy: false }, { lastCompletedAt: null }, { nextAlarmAt: null },
+    { nextAlarmAt: new Date(now - 180000).toISOString() },
+    { lastCompletedAt: new Date(now + 360000).toISOString() }]) {
+    assert.equal(evaluateWorkerHealth({ ...healthy, ...override }, { now }).healthy, false);
+  }
+  assert.equal(evaluateWorkerHealth({}, { now }).healthy, false);
+});
 
 test('更新時刻が閾値内なら正常と判定する', () => {
   const result = evaluateMonitorHealth(

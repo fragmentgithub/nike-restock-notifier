@@ -1,9 +1,11 @@
 import { mkdir } from 'node:fs/promises';
 import { normalizeDiscordWebhook, postDiscordWebhook } from '../src/discord.js';
 import { readJsonFile, writeJsonFileAtomic } from '../src/json-file.js';
+import { CLOUDFLARE_HEALTH_URL, githubHealthHeaders } from './github-health-auth.js';
 import {
   evaluateMonitorHealth,
   evaluateStatusFetchFailure,
+  evaluateWorkerHealth,
   shouldNotifyHealthTransition,
 } from '../src/health.js';
 
@@ -23,10 +25,12 @@ let health;
 let fetchFailureStreak = 0;
 
 try {
-  const response = await fetch(statusUrl, { cache: 'no-store', signal: AbortSignal.timeout(15000) });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const cloudflare = statusUrl === CLOUDFLARE_HEALTH_URL;
+  const headers = cloudflare ? await githubHealthHeaders() : {};
+  const response = await fetch(statusUrl, { cache: 'no-store', headers, redirect: 'error', signal: AbortSignal.timeout(15000) });
+  if (!response.ok && !(cloudflare && response.status === 503)) throw new Error(`${response.status} ${response.statusText}`);
   status = await response.json();
-  health = evaluateMonitorHealth(status, { staleMinutes });
+  health = cloudflare ? evaluateWorkerHealth(status) : evaluateMonitorHealth(status, { staleMinutes });
 } catch (error) {
   const failure = evaluateStatusFetchFailure(previous, error, { threshold: 2 });
   fetchFailureStreak = failure.fetchFailureStreak;

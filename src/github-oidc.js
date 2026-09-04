@@ -10,6 +10,13 @@ export const GITHUB_MIGRATION_TRUST = Object.freeze({
   ownerId: '75737556',
   workflowRef: 'fragmentgithub/nike-restock-notifier/.github/workflows/cloudflare-transfer.yml@refs/heads/main',
   ref: 'refs/heads/main',
+  events: ['workflow_dispatch'],
+});
+export const GITHUB_HEALTH_TRUST = Object.freeze({
+  ...GITHUB_MIGRATION_TRUST,
+  audience: 'https://nike-restock-notifier.only-this-moment.workers.dev/healthz',
+  workflowRef: 'fragmentgithub/nike-restock-notifier/.github/workflows/health.yml@refs/heads/main',
+  events: ['workflow_dispatch', 'schedule'],
 });
 const JWKS_URL = 'https://token.actions.githubusercontent.com/.well-known/jwks';
 const MAX_TOKEN_BYTES = 16384;
@@ -17,7 +24,7 @@ const MAX_JWKS_BYTES = 65536;
 const CLOCK_SKEW_SECONDS = 60;
 
 /** Only the named manual workflow receives the narrow migration permission. */
-export function createGitHubOidcVerifier({ fetchImpl = fetch, now = Date.now } = {}) {
+export function createGitHubOidcVerifier({ fetchImpl = fetch, now = Date.now, trust = GITHUB_MIGRATION_TRUST } = {}) {
   let cache;
   let refreshing;
 
@@ -84,7 +91,7 @@ export function createGitHubOidcVerifier({ fetchImpl = fetch, now = Date.now } =
       if (!header || header.alg !== 'RS256' || header.typ !== 'JWT' ||
           typeof header.kid !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(header.kid) ||
           header.crit !== undefined || header.b64 !== undefined || header.jku !== undefined ||
-          header.jwk !== undefined || header.x5u !== undefined || !validClaims(claims, now())) return null;
+          header.jwk !== undefined || header.x5u !== undefined || !validClaims(claims, now(), trust)) return null;
       let key = (await loadKeys()).get(header.kid);
       // Permit key rotation while bounding forced refreshes caused by unknown kids.
       if (!key && cache && now() - cache.fetchedAt >= 30000) key = (await loadKeys(true)).get(header.kid);
@@ -92,7 +99,7 @@ export function createGitHubOidcVerifier({ fetchImpl = fetch, now = Date.now } =
       const valid = await crypto.subtle.verify(
         'RSASSA-PKCS1-v1_5', key, decodeBytes(signature), new TextEncoder().encode(`${head}.${body}`),
       );
-      if (!valid || !validClaims(claims, now())) return null;
+      if (!valid || !validClaims(claims, now(), trust)) return null;
       // Never pass the bearer token, raw JWT, or unnecessary identity claims downstream.
       return { runId: claims.run_id, runAttempt: claims.run_attempt, migrationId: `${claims.run_id}:${claims.run_attempt}` };
     } catch { return null; }
@@ -100,15 +107,15 @@ export function createGitHubOidcVerifier({ fetchImpl = fetch, now = Date.now } =
 }
 
 export const verifyGitHubOidc = createGitHubOidcVerifier();
+export const verifyGitHubHealthOidc = createGitHubOidcVerifier({ trust: GITHUB_HEALTH_TRUST });
 
-function validClaims(claims, timestamp) {
+function validClaims(claims, timestamp, trust) {
   if (!claims || typeof claims !== 'object' || Array.isArray(claims)) return false;
-  const trust = GITHUB_MIGRATION_TRUST;
   if (claims.iss !== trust.issuer || claims.aud !== trust.audience ||
       claims.repository !== trust.repository || claims.repository_id !== trust.repositoryId ||
       claims.repository_owner !== trust.owner || claims.repository_owner_id !== trust.ownerId ||
       claims.workflow_ref !== trust.workflowRef || claims.ref !== trust.ref ||
-      claims.event_name !== 'workflow_dispatch' || claims.ref_type !== 'branch') return false;
+      !trust.events.includes(claims.event_name) || claims.ref_type !== 'branch') return false;
   const subjects = [
     `repo:${trust.repository}:ref:${trust.ref}`,
     `repo:${trust.owner}@${trust.ownerId}/nike-restock-notifier@${trust.repositoryId}:ref:${trust.ref}`,

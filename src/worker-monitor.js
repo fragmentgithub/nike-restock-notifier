@@ -196,7 +196,12 @@ export class MonitorController {
   }
 
   async alarm() {
-    if (this.running) return;
+    if (this.running) {
+      // A slow check can outlive the recovery interval. Consuming this alarm
+      // must not leave that still-running check without a future recovery attempt.
+      await this.ctx.storage.setAlarm(this.now() + RECOVERY_DELAY_MS);
+      return;
+    }
     return this.exclusive(async () => {
       let control = this.control();
       if (control.mode === 'paused') { await this.ctx.storage.deleteAlarm(); return; }
@@ -207,8 +212,9 @@ export class MonitorController {
         await this.ctx.storage.setAlarm(this.now() + RECOVERY_DELAY_MS);
         control = { ...control, lastStartedAt: new Date(this.now()).toISOString() };
         const engine = this.engine(control);
-        const status = engine.status();
-        await this.documents.commit({ control, state: engine.snapshot(), status: this.safe(status) });
+        // The engine starts from committed state and persists every completed step
+        // (and before Discord). Do not reaggregate and rewrite the old history here.
+        await this.documents.commit({ control });
         await engine.tick();
         control = { ...control, lastCompletedAt: new Date(this.now()).toISOString(), lastError: null };
         await this.documents.commit({ control });

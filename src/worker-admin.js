@@ -1,6 +1,6 @@
 import { timingSafeEqual } from 'node:crypto';
 import { scrubDiscordWebhook } from './discord.js';
-import { verifyGitHubOidc } from './github-oidc.js';
+import { verifyGitHubOidc, verifyGitHubHealthOidc } from './github-oidc.js';
 
 export const MAX_ADMIN_BYTES = 12 * 1024 * 1024;
 export const MONITOR_MODES = new Set(['paused', 'shadow', 'active']);
@@ -121,7 +121,7 @@ export async function handleWorkerRequest(request, env) {
     if (path.startsWith('/admin/')) {
       if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'Unauthorized' }, 401);
       const methods = {
-        '/admin/state': 'GET', '/admin/health': 'GET', '/admin/import': 'POST',
+        '/admin/state': 'GET', '/admin/status': 'GET', '/admin/health': 'GET', '/admin/import': 'POST',
         '/admin/mode': 'POST', '/admin/probe': 'POST',
         '/admin/migration-credential': ['GET', 'DELETE'],
       };
@@ -130,6 +130,7 @@ export async function handleWorkerRequest(request, env) {
       if (!allowed.includes(request.method)) return methodNotAllowed(allowed.join(', '));
       const monitor = env.MONITOR.getByName('nike-jp');
       if (path === '/admin/state') return json(await monitor.exportState());
+      if (path === '/admin/status') return json(await monitor.getStatus());
       if (path === '/admin/health') return json(await monitor.health());
       if (path === '/admin/migration-credential') {
         const result = request.method === 'GET'
@@ -154,13 +155,19 @@ export async function handleWorkerRequest(request, env) {
       return json(result, status);
     }
     if (path === '/status.json' || path === '/healthz') {
+      const header = request.headers.get('authorization') || '';
+      const isAdmin = await authorized(request, env.ADMIN_TOKEN);
+      const isWatchdog = !isAdmin && path === '/healthz' && header.startsWith('Bearer ')
+        && await verifyGitHubHealthOidc(header.slice(7));
+      if (!isAdmin && !isWatchdog) return json({ error: 'Unauthorized' }, 401);
       if (!['GET', 'HEAD'].includes(request.method)) return methodNotAllowed('GET, HEAD');
       const monitor = env.MONITOR.getByName('nike-jp');
       const data = path === '/status.json' ? await monitor.getStatus() : await monitor.health();
       const response = json(data, path === '/healthz' && !data.healthy ? 503 : 200);
       return request.method === 'HEAD' ? new Response(null, response) : response;
     }
-    return env.ASSETS ? await env.ASSETS.fetch(request) : json({ error: 'Not found' }, 404);
+    // The monitor has no public website. Never fall through to an asset binding.
+    return json({ error: 'Not found' }, 404);
   } catch (error) {
     if (error instanceof RequestError) return json({ error: error.message }, error.status);
     // RPC/fetch errors can contain URLs, tokens or provider internals. Never echo them.
@@ -202,7 +209,7 @@ async function readJson(request) {
 function json(value, status = 200) {
   return Response.json(value, {
     status,
-    headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
+    headers: { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'x-robots-tag': 'noindex, nofollow' },
   });
 }
 function methodNotAllowed(allow) {

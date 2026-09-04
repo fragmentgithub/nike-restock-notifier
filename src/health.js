@@ -1,3 +1,15 @@
+export function evaluateWorkerHealth(status, { now = Date.now() } = {}) {
+  const updatedAt = validIsoDate(status?.lastCompletedAt);
+  const ageMinutes = updatedAt ? Math.max(0, Math.floor((now - Date.parse(updatedAt)) / 60000)) : null;
+  let reason = '';
+  if (status?.mode !== 'active') reason = '本番監視が停止または検証モードになっています';
+  else if (status.webhookConfigured !== true) reason = 'Discord通知先が設定されていません';
+  else if (!updatedAt || Date.parse(updatedAt) > now + 300000) reason = '監視の完了時刻を確認できません';
+  else if (status.healthy !== true || !Number.isFinite(Date.parse(status.nextAlarmAt || '')) ||
+      Date.parse(status.nextAlarmAt) < now - 120000) reason = '監視処理または次回起動の予約に異常があります';
+  return { healthy: !reason, reason, updatedAt, ageMinutes };
+}
+
 export function evaluateMonitorHealth(
   status,
   { now = Date.now(), staleMinutes = 50, futureToleranceMinutes = 5 } = {},

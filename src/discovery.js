@@ -84,6 +84,7 @@ export async function discoverNikeMind001Products(options = {}) {
     });
 
     if (!response.ok) {
+      await response.body?.cancel();
       throw new Error(`${response.status} ${response.statusText}`);
     }
 
@@ -123,7 +124,10 @@ export async function discoverNikeFragmentProducts(options = {}) {
         timeoutMs,
         fetchImpl,
       });
-      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`${response.status} ${response.statusText}`);
+      }
 
       const catalog = parseNikeFragmentCatalog(await response.text(), catalogUrl);
       if (!catalog.parseable) {
@@ -201,12 +205,12 @@ function parseNikeFragmentCatalog(html, sourceUrl) {
   };
 }
 
-export function extractNikeMind001Products(html, sourceUrl = 'https://www.nike.com/jp/') {
+export function extractNikeMind001Products(html, sourceUrl = 'https://www.nike.com/jp/', { nextData: parsedNextData } = {}) {
   const found = new Map();
   const excludedStyleColors = new Set();
   const normalizedHtml = normalizeEscapedHtml(html);
 
-  const nextData = parseNextData(normalizedHtml);
+  const nextData = parsedNextData || parseNextData(normalizedHtml);
   if (nextData) collectProductsFromValue(nextData, found, sourceUrl, excludedStyleColors);
 
   const linkPattern = /((?:https?:\/\/www\.nike\.com)?\/jp\/(?:[a-z]{2}\/)?t\/[^"'<>\\\s]*mind-001[^"'<>\\\s]*\/([A-Z0-9]{5,8}-[A-Z0-9]{3}))/gi;

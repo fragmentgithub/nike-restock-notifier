@@ -451,3 +451,158 @@ test('invalid product settings disable alarms and all outbound requests', async 
   assert.equal(requests, 0);
   assert.ok(engine.status().config.productConfigError);
 });
+
+test('a normal unchanged stock check commits its observation and scheduling once', async () => {
+  const timestamp = Date.now();
+  const saves = [];
+  const engine = createMonitorEngine({ env: environment(), state: cache(timestamp, { lastStockKey: '27' }),
+    now: () => timestamp, fetchImpl: async () => productPage(),
+    persist: async (state, status) => saves.push({ state, status }),
+  });
+  await engine.tick();
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0].state.lastTickAt, iso(timestamp));
+  assert.equal(saves[0].status.metrics.checks, 1);
+  assert.equal(saves[0].status.nextCheckAt, iso(timestamp + 120000));
+});
+
+test('a notification keeps its pending commit before the send and its acknowledgment afterward', async () => {
+  const timestamp = Date.now();
+  const steps = [];
+  const engine = createMonitorEngine({ env: environment([TARGET], { DISCORD_WEBHOOK: WEBHOOK }),
+    state: cache(timestamp), now: () => timestamp,
+    fetchImpl: async (url) => {
+      if (url.startsWith('https://discord.com')) {
+        steps.push('send');
+        return new Response(null, { status: 204 });
+      }
+      return productPage();
+    },
+    persist: async (state) => {
+      const entry = state.knownProducts[TARGET];
+      steps.push(entry.lastStockKey === '27' ? 'acknowledged' : 'pending');
+      assert.equal(Boolean(entry.pendingNotification), entry.lastStockKey !== '27');
+    },
+  });
+  assert.equal((await engine.tick()).notified, true);
+  assert.deepEqual(steps, ['pending', 'send', 'acknowledged']);
+});
+
+test('failed catalog rechecks return to the paused interval after three attempts across restarts', async () => {
+  let timestamp = Date.now();
+  const env = environment([TARGET], { DISCOVERY_INTERVAL_HOURS: '168' });
+  let state = cache(timestamp, {
+    lastStockKey: '27', pausedAt: iso(timestamp), pausedReason: 'unreachable',
+    catalogPresent: true, catalogReprobePending: true, lastSeenAt: null,
+  });
+  let engine;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    engine = createMonitorEngine({ env, state, now: () => timestamp,
+      fetchImpl: async () => new Response('Unavailable', { status: 503 }),
+    });
+    assert.equal((await engine.tick()).kind, 'check');
+    state = engine.snapshot();
+    assert.ok(state.knownProducts[TARGET].pausedAt);
+    assert.equal(state.knownProducts[TARGET].lastStockKey, '27');
+    if (attempt < 2) timestamp = engine.nextAlarmAt();
+  }
+  assert.equal(state.knownProducts[TARGET].catalogReprobePending, false);
+  assert.equal(engine.nextAlarmAt(), timestamp + 24 * 3600000);
+});
+
+test('catalog rechecks tolerate transient failures and a successful retry resumes normal monitoring', async () => {
+  let timestamp = Date.now();
+  const env = environment();
+  let state = cache(timestamp, {
+    pausedAt: iso(timestamp), pausedReason: 'unreachable', catalogReprobePending: true,
+  });
+  let engine;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    engine = createMonitorEngine({ env, state, now: () => timestamp,
+      fetchImpl: async () => attempt < 2 ? new Response('Unavailable', { status: 503 }) : productPage(),
+    });
+    await engine.tick();
+    state = engine.snapshot();
+    if (attempt < 2) timestamp = engine.nextAlarmAt();
+  }
+  assert.equal(state.knownProducts[TARGET].pausedAt, null);
+  assert.equal(state.knownProducts[TARGET].catalogReprobePending, false);
+  assert.equal(state.knownProducts[TARGET].catalogReprobeFailures, 0);
+  assert.equal(engine.nextAlarmAt(), timestamp + 120000);
+});
+
+test('a new authoritative URL schedules a paused product once without blindly resuming it', async () => {
+  const timestamp = Date.now();
+  const updatedUrl = `https://www.nike.com/jp/t/mind-001-new-route/${TARGET}`;
+  const state = cache(timestamp, {
+    pausedAt: iso(timestamp), pausedReason: 'unreachable', lastSeenAt: iso(timestamp),
+    lastStockKey: '27', catalogPresent: true,
+  });
+  delete state.lastDiscoveryAt;
+  delete state.lastDiscoverySuccessAt;
+  const engine = createMonitorEngine({ env: environment(), state, now: () => timestamp,
+    fetchImpl: async () => new Response(`<a href="${updatedUrl}">Mind 001</a>`),
+  });
+  await engine.tick();
+  const entry = engine.snapshot().knownProducts[TARGET];
+  assert.equal(entry.url, updatedUrl);
+  assert.equal(entry.catalogReprobePending, true);
+  assert.equal(entry.lastSeenAt, null);
+  assert.equal(entry.pausedAt, iso(timestamp));
+  assert.equal(entry.lastStockKey, '27');
+
+  const attempted = engine.snapshot();
+  attempted.discoveryCycle = null;
+  attempted.knownProducts[TARGET].catalogReprobePending = false;
+  attempted.knownProducts[TARGET].catalogReprobeFailures = 3;
+  attempted.knownProducts[TARGET].lastSeenAt = iso(timestamp);
+  const unchanged = createMonitorEngine({ env: environment(), state: attempted, now: () => timestamp,
+    fetchImpl: async () => new Response(`<a href="${updatedUrl}">Mind 001</a>`),
+  });
+  await unchanged.tick();
+  assert.equal(unchanged.snapshot().knownProducts[TARGET].catalogReprobePending, false);
+  assert.equal(unchanged.snapshot().knownProducts[TARGET].lastSeenAt, iso(timestamp));
+});
+
+test('a seeded Fragment must disappear and reappear according to the actual catalog', async () => {
+  let timestamp = Date.now();
+  let present = false;
+  const fragment = DEFAULT_FRAGMENT_PRODUCTS[0];
+  const env = environment([fragment.styleColor], { FRAGMENT_DISCOVERY_URLS: 'https://www.nike.com/jp/launch' });
+  let state = { knownProducts: { [fragment.styleColor]: {
+    ...fragment, pausedAt: iso(timestamp), pausedReason: 'delisted',
+    lastSeenAt: iso(timestamp), catalogPresent: true, lastStockKey: '27',
+  } } };
+  const fetchImpl = async (url) => {
+    if (!url.includes('/launch')) return new Response(`<a href="${urlFor(TARGET)}">Mind 001</a>`);
+    const products = present ? { frag: { styleColor: fragment.styleColor, title: 'Mind 001 x Fragment', genders: ['MEN'] } } : {};
+    const threads = present ? { frag: {
+      seo: { slug: 'mind-001-fragment-black' }, coverCard: { subtitle: 'Mind 001 x Fragment' },
+      cards: [{ actions: [{ product: { productId: 'frag', styleColor: fragment.styleColor } }] }],
+    } } : {};
+    return new Response(`<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: {
+      initialState: { product: { products: { data: { items: products } }, threads: { data: { items: threads } } } },
+    } } })}</script>`);
+  };
+  for (let index = 0; index < 2; index += 1) {
+    const engine = createMonitorEngine({ env, state, now: () => timestamp, notify: false, fetchImpl });
+    assert.equal((await engine.tick()).kind, 'discovery');
+    state = engine.snapshot();
+    if (index === 0) timestamp = engine.nextAlarmAt();
+  }
+  assert.equal(state.knownProducts[fragment.styleColor].catalogPresent, false);
+  present = true;
+  timestamp += 6 * 3600000;
+  for (let index = 0; index < 2; index += 1) {
+    const engine = createMonitorEngine({ env, state, now: () => timestamp, notify: false, fetchImpl });
+    assert.equal((await engine.tick()).kind, 'discovery');
+    state = engine.snapshot();
+    if (index === 0) timestamp = engine.nextAlarmAt();
+  }
+  const entry = state.knownProducts[fragment.styleColor];
+  assert.equal(entry.catalogPresent, true);
+  assert.equal(entry.catalogReprobePending, true);
+  assert.equal(entry.lastSeenAt, null);
+  assert.equal(entry.lastStockKey, '27');
+  assert.ok(entry.pausedAt);
+});

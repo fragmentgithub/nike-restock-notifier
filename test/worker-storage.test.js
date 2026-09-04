@@ -114,3 +114,41 @@ test('persistence does not resolve until writes are confirmed durable', async (t
   await commit;
   assert.equal(resolved, true);
 });
+
+test('warm control/status reads and unchanged saves do not issue redundant SQL reads or writes', async (t) => {
+  const storage = durableStorageFor(t);
+  const documents = new MonitorStorage(storage);
+  const initial = { control: { mode: 'shadow' }, status: { count: 3 } };
+  await documents.commit(initial);
+  let queries = 0;
+  const exec = storage.sql.exec;
+  storage.sql.exec = (...args) => { queries++; return exec(...args); };
+  const returned = documents.read('control');
+  returned.mode = 'modified-by-caller';
+  assert.equal(documents.read('control').mode, 'shadow');
+  assert.deepEqual(documents.read('status'), { count: 3 });
+  await documents.commit(initial);
+  assert.equal(queries, 0);
+  await documents.commit({ control: { mode: 'paused' } });
+  assert.equal(documents.read('control').mode, 'paused');
+  assert.deepEqual(new MonitorStorage(storage).read('control'), { mode: 'paused' });
+});
+
+test('a rolled-back sample replacement leaves cached and cold state consistent for the next retry', async (t) => {
+  const storage = durableStorageFor(t);
+  const documents = new MonitorStorage(storage);
+  await documents.commit({ state: { checkSamples: [{ id: 1 }] }, status: { version: 1 } });
+  const exec = storage.sql.exec;
+  storage.sql.exec = (query, ...args) => {
+    if (query.startsWith('INSERT INTO monitor_documents') && args[0] === 'status') throw new Error('disk failure');
+    return exec(query, ...args);
+  };
+  const replacement = { state: { checkSamples: [{ id: 2 }] }, status: { version: 2 } };
+  await assert.rejects(documents.commit(replacement), /disk failure/);
+  assert.deepEqual(documents.read('state').checkSamples, [{ id: 1 }]);
+  assert.deepEqual(new MonitorStorage(storage).read('state').checkSamples, [{ id: 1 }]);
+  storage.sql.exec = exec;
+  await documents.commit(replacement);
+  assert.deepEqual(documents.read('state').checkSamples, [{ id: 2 }]);
+  assert.deepEqual(new MonitorStorage(storage).read('state').checkSamples, [{ id: 2 }]);
+});

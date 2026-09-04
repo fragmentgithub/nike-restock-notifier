@@ -118,11 +118,12 @@ export async function checkNikeStock(productUrl, options = {}) {
     }
 
     const html = await response.text();
-    const parsed = parseProductPage(html, productRef, sizeFilters);
+    const nextData = parseNextData(html);
+    const parsed = parseProductPage(html, productRef, sizeFilters, nextData);
     if (!isParsedPageUsable(parsed, html, productRef, response.url)) {
       throw new Error('Nikeの商品データをページから読み取れませんでした');
     }
-    const relatedProducts = extractNikeMind001Products(html, productRef.url);
+    const relatedProducts = extractNikeMind001Products(html, productRef.url, { nextData });
 
     return {
       ...parsed,
@@ -260,17 +261,18 @@ function parseProductFeed(payload, productRef, sizeFilters) {
   }));
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = unavailableReason || structuredAvailabilityState(sizes, matchingSizes);
 
   return {
     product,
     sizes,
     availableSizes,
     matchingSizes,
-    inStock: matchingSizes.length > 0,
+    inStock: availabilityState === 'available',
     statusLabel: unavailableReason === 'coming-soon'
       ? '販売開始前'
-      : statusLabelFor(sizes, matchingSizes, sizeFilters),
-    availabilityState: unavailableReason || (matchingSizes.length > 0 ? 'available' : 'out-of-stock'),
+      : availabilityState === 'unknown' ? '在庫判定不可' : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState,
     releaseAt,
   };
 }
@@ -290,6 +292,7 @@ function feedProductUnavailableReason(info, releaseAt) {
 
   const releaseTimestamp = Date.parse(releaseAt || '');
   if (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) return 'coming-soon';
+  if (/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE|(?:^|\s)INACTIVE(?:\s|$)/i.test(markers)) return 'out-of-stock';
   return null;
 }
 
@@ -317,6 +320,7 @@ function buildProductFromFeed(info, productRef) {
 
 function buildSizesFromFeed(info) {
   const skus = asArray(info?.skus);
+  const hasAvailabilityData = Array.isArray(info?.availableSkus);
   const availableSkus = asArray(info?.availableSkus);
   const availableBySkuId = new Map();
 
@@ -327,12 +331,12 @@ function buildSizesFromFeed(info) {
   }
 
   return skus.map((sku) => {
-    const availableSku = availableBySkuId.get(String(sku?.id || '')) || {};
+    const availableSku = availableBySkuId.get(String(sku?.id || ''));
     const level = String(availableSku?.level || availableSku?.inventoryLevel || '').toUpperCase();
-    const available =
-      availableSku?.available === true ||
-      availableSku?.available === 'true' ||
-      ['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE'].includes(level);
+    const availability = availableSku
+      ? inventoryAvailability(availableSku.available, level)
+      : hasAvailabilityData ? false : null;
+    const available = availability === true;
     const label = firstPresent([
       sku?.localizedSize,
       sku?.nikeSize,
@@ -348,13 +352,12 @@ function buildSizesFromFeed(info) {
       nikeSize: sku?.nikeSize || '',
       size: sku?.size || '',
       available,
-      level: level || (available ? 'AVAILABLE' : 'OOS'),
+      level: availability === null ? 'UNKNOWN' : available ? level || 'AVAILABLE' : 'OOS',
     };
   });
 }
 
-function parseProductPage(html, productRef, sizeFilters) {
-  const nextData = parseNextData(html);
+function parseProductPage(html, productRef, sizeFilters, nextData) {
   const nextParsed = nextData
     ? parseSnkrsProductData(nextData, productRef, sizeFilters) ||
       parseNextProductData(nextData, productRef, sizeFilters)
@@ -376,7 +379,8 @@ function parseProductPage(html, productRef, sizeFilters) {
   const pageText = decodeHtml(html.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<[^>]+>/g, ' '));
   const soldOut = /在庫なし|売り切れ|sold\s*out|out\s*of\s*stock/i.test(pageText);
   const addToCart = /カートに追加|バッグに追加|add\s+to\s+bag|add\s+to\s+cart/i.test(pageText);
-  const sizes = [...extractSizesFromHtmlControls(html), ...extractSizesFromJsonFragments(html)].map(
+  const controlSizes = extractSizesFromHtmlControls(html);
+  const sizes = [...controlSizes, ...extractSizesFromJsonFragments(html)].map(
     (size) => ({
       ...size,
       available: addToCart && !soldOut && size.available,
@@ -384,10 +388,13 @@ function parseProductPage(html, productRef, sizeFilters) {
   );
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
-  const availabilityState = addToCart && !soldOut
+  const hasProductLevelStock = controlSizes.length === 0 && sizes.length === 0 && addToCart && !soldOut;
+  const availabilityState = matchingSizes.length > 0 || hasProductLevelStock
     ? 'available'
     : soldOut
       ? 'out-of-stock'
+      : controlSizes.length > 0 && addToCart
+        ? 'out-of-stock'
       : 'unknown';
 
   return {
@@ -402,7 +409,7 @@ function parseProductPage(html, productRef, sizeFilters) {
     sizes,
     availableSizes,
     matchingSizes,
-    inStock: matchingSizes.length > 0 || (sizeFilters.length === 0 && addToCart && !soldOut),
+    inStock: matchingSizes.length > 0 || (sizeFilters.length === 0 && hasProductLevelStock),
     statusLabel:
       availabilityState === 'unknown'
         ? sizes.length > 0
@@ -447,10 +454,7 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
   const productAvailable = !comingSoon && !explicitlyInactive;
   const sizes = asArray(selectedProduct.skus).map((sku) => {
     const level = String(sku?.level || '').toUpperCase();
-    const availableMarker =
-      sku?.available === true ||
-      sku?.available === 'true' ||
-      ['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE', 'ACTIVE'].includes(level);
+    const availability = inventoryAvailability(sku?.available, level);
     const countrySpecification = asArray(
       sku?.country_specifications || sku?.countrySpecifications,
     )[0] || {};
@@ -462,7 +466,7 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
     ]);
     const nikeSize = firstPresent([sku?.nike_size, sku?.nikeSize]);
     const label = localizedSize || nikeSize || sku?.id || '';
-    const available = productAvailable && availableMarker;
+    const available = productAvailable && availability === true;
 
     return {
       id: sku?.id || sku?.gtin || '',
@@ -471,11 +475,14 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
       nikeSize: nikeSize || '',
       size: nikeSize || localizedSize || '',
       available,
-      level: available ? level || 'AVAILABLE' : level || 'OOS',
+      level: productAvailable && availability === null ? 'UNKNOWN' : available ? level || 'AVAILABLE' : 'OOS',
     };
   });
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = comingSoon
+    ? 'coming-soon'
+    : explicitlyInactive ? 'out-of-stock' : structuredAvailabilityState(sizes, matchingSizes);
   const title = firstPresent([
     coverCard.subtitle,
     selectedProduct.title,
@@ -502,15 +509,11 @@ function parseSnkrsProductData(nextData, productRef, sizeFilters) {
     sizes,
     availableSizes,
     matchingSizes,
-    inStock: matchingSizes.length > 0,
+    inStock: availabilityState === 'available',
     statusLabel: comingSoon
       ? '販売開始前'
-      : statusLabelFor(sizes, matchingSizes, sizeFilters),
-    availabilityState: comingSoon
-      ? 'coming-soon'
-      : matchingSizes.length > 0
-        ? 'available'
-        : 'out-of-stock',
+      : availabilityState === 'unknown' ? '在庫判定不可' : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState,
     releaseAt,
     source: 'nike-snkrs-next-data',
   };
@@ -534,7 +537,8 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
   const unavailableReason = nextProductUnavailableReason(selectedProduct, releaseAt);
   const productUnavailable = Boolean(unavailableReason);
   const sizes = asArray(selectedProduct.sizes).map((size) => {
-    const available = !productUnavailable && isNextSizeAvailable(size);
+    const availability = nextSizeAvailability(size);
+    const available = !productUnavailable && availability === true;
     const label = firstPresent([
       size.localizedLabel,
       withPrefix(size.localizedLabelPrefix, size.localizedLabel),
@@ -550,23 +554,26 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
       nikeSize: size.label || '',
       size: size.label || '',
       available,
-      level: available ? normalizeInventoryLevel(size.status) || 'AVAILABLE' : 'OUT_OF_STOCK',
+      level: !productUnavailable && availability === null
+        ? 'UNKNOWN'
+        : available ? normalizeInventoryLevel(size.status) || 'AVAILABLE' : 'OUT_OF_STOCK',
     };
   });
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = unavailableReason || structuredAvailabilityState(sizes, matchingSizes);
 
   return {
     product,
     sizes,
     availableSizes,
     matchingSizes,
-    inStock: matchingSizes.length > 0,
+    inStock: availabilityState === 'available',
     statusLabel:
       unavailableReason === 'coming-soon'
         ? '販売開始前'
-        : statusLabelFor(sizes, matchingSizes, sizeFilters),
-    availabilityState: unavailableReason || (matchingSizes.length > 0 ? 'available' : 'out-of-stock'),
+        : availabilityState === 'unknown' ? '在庫判定不可' : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState,
     releaseAt,
     source: 'nike-next-data',
   };
@@ -627,10 +634,26 @@ function nextProductReleaseAt(product) {
   return null;
 }
 
-function isNextSizeAvailable(size) {
+function nextSizeAvailability(size) {
   const status = String(size.status || '').toUpperCase();
-  // 未知の状態を在庫ありに倒すと誤通知になるため、購入可能と確認済みの状態だけを許可する。
-  return ['ACTIVE', 'AVAILABLE', 'IN_STOCK'].includes(status);
+  if (['ACTIVE', 'AVAILABLE', 'IN_STOCK'].includes(status)) return true;
+  if (['INACTIVE', 'UNAVAILABLE', 'OUT_OF_STOCK', 'OOS', 'SOLD_OUT'].includes(status)) return false;
+  return null;
+}
+
+function inventoryAvailability(available, level) {
+  if (available === false || available === 'false') return false;
+  if (available === true || available === 'true') return true;
+  if (['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE', 'ACTIVE', 'IN_STOCK'].includes(level)) return true;
+  if (['OOS', 'OUT_OF_STOCK', 'SOLD_OUT', 'UNAVAILABLE', 'INACTIVE'].includes(level)) return false;
+  return null;
+}
+
+function structuredAvailabilityState(sizes, matchingSizes) {
+  // Missing or unfamiliar inventory must not confirm a sellout or remove sizes
+  // from the remembered stock composition. Preserve the last reliable observation.
+  if (!sizes.length || sizes.some((size) => size.level === 'UNKNOWN')) return 'unknown';
+  return matchingSizes.length > 0 ? 'available' : 'out-of-stock';
 }
 
 function formatNextPrice(price) {
@@ -661,7 +684,7 @@ function normalizeInventoryLevel(value) {
 }
 
 function extractSizesFromHtmlControls(html) {
-  const sizeSelectorIndex = html.indexOf('id="size-selector"');
+  const sizeSelectorIndex = html.search(/\bid\s*=\s*["']size-selector["']/i);
   if (sizeSelectorIndex === -1) return [];
 
   const section = html.slice(sizeSelectorIndex, sizeSelectorIndex + 50000);
@@ -677,7 +700,7 @@ function extractSizesFromHtmlControls(html) {
     const key = normalizeSize(label);
     if (!key || found.has(key)) continue;
 
-    const disabled = /\bdisabled\b|aria-disabled=["']true["']/i.test(attrs);
+    const disabled = /(?:^|\s)disabled(?:\s|=|$)|(?:^|\s)aria-disabled\s*=\s*["']true["']/i.test(attrs);
     found.set(key, {
       id: attrValue(attrs, 'data-testid') || '',
       label,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createGitHubOidcVerifier, GITHUB_MIGRATION_TRUST as TRUST } from '../src/github-oidc.js';
+import { createGitHubOidcVerifier, GITHUB_MIGRATION_TRUST as TRUST, GITHUB_HEALTH_TRUST } from '../src/github-oidc.js';
 
 const NOW = Date.parse('2026-09-05T00:00:00.000Z');
 const seconds = NOW / 1000;
@@ -50,6 +50,19 @@ test('a signed JWT for the pinned workflow grants only its run-bound migration i
   });
   const immutable = `repo:${TRUST.owner}@${TRUST.ownerId}/nike-restock-notifier@${TRUST.repositoryId}:ref:${TRUST.ref}`;
   assert.ok(await verify(await sign(claims({ sub: immutable }))));
+});
+
+test('health identity accepts only the pinned watchdog and cannot authorize migration', async () => {
+  const health = verifier({ trust: GITHUB_HEALTH_TRUST });
+  for (const event_name of ['schedule', 'workflow_dispatch']) {
+    const token = await sign(claims({ workflow_ref: GITHUB_HEALTH_TRUST.workflowRef,
+      aud: GITHUB_HEALTH_TRUST.audience, event_name }));
+    assert.ok(await health(token));
+    assert.equal(await verifier()(token), null);
+  }
+  assert.equal(await health(await sign()), null);
+  assert.equal(await health(await sign(claims({ workflow_ref: GITHUB_HEALTH_TRUST.workflowRef,
+    aud: GITHUB_HEALTH_TRUST.audience, event_name: 'pull_request' }))), null);
 });
 
 test('repository, immutable IDs, workflow, branch, trigger, issuer, audience and subject must all match', async () => {
