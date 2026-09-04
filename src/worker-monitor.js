@@ -12,7 +12,7 @@ export class MonitorController {
   constructor(ctx, env, { engineFactory = createMonitorEngine, probe = probeNike, now = Date.now } = {}) {
     this.ctx = ctx;
     this.env = env;
-    this.documents = new MonitorStorage(ctx.storage);
+    this.documents = new MonitorStorage(ctx.storage, { now });
     this.engineFactory = engineFactory;
     this.probeNike = probe;
     this.now = now;
@@ -59,6 +59,10 @@ export class MonitorController {
         lastError: control.lastError || null,
       },
     });
+  }
+
+  async getTrends(options = {}) {
+    return this.exclusive(async () => this.safe(await this.documents.getTrends(options)));
   }
 
   async health() {

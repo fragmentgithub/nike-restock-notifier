@@ -121,7 +121,7 @@ export async function handleWorkerRequest(request, env) {
     if (path.startsWith('/admin/')) {
       if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'Unauthorized' }, 401);
       const methods = {
-        '/admin/state': 'GET', '/admin/status': 'GET', '/admin/health': 'GET', '/admin/import': 'POST',
+        '/admin/state': 'GET', '/admin/status': 'GET', '/admin/health': 'GET', '/admin/trends': 'GET', '/admin/import': 'POST',
         '/admin/mode': 'POST', '/admin/probe': 'POST',
         '/admin/migration-credential': ['GET', 'DELETE'],
       };
@@ -131,6 +131,19 @@ export async function handleWorkerRequest(request, env) {
       const monitor = env.MONITOR.getByName('nike-jp');
       if (path === '/admin/state') return json(await monitor.exportState());
       if (path === '/admin/status') return json(await monitor.getStatus());
+      if (path === '/admin/trends') {
+        const params = new URL(request.url).searchParams;
+        const product = params.get('styleColor') ?? 'all';
+        const styleColor = product === 'all' ? 'all' : product.toUpperCase();
+        const days = params.get('days') ?? 'all';
+        if ([...params.keys()].some((key) => !['days', 'styleColor'].includes(key)) ||
+            params.getAll('days').length > 1 || params.getAll('styleColor').length > 1 ||
+            (styleColor !== 'all' && !/^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/.test(styleColor)) ||
+            !['all', '7', '30', '90', '365', '730'].includes(days)) {
+          return json({ error: 'Invalid trend filter' }, 400);
+        }
+        return json(await monitor.getTrends({ styleColor, days: days === 'all' ? days : Number(days) }));
+      }
       if (path === '/admin/health') return json(await monitor.health());
       if (path === '/admin/migration-credential') {
         const result = request.method === 'GET'

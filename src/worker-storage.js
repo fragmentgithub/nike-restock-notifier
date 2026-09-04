@@ -1,9 +1,11 @@
+import { RestockArchive } from './worker-trend-storage.js';
+
 const CHUNK_CHARACTERS = 128000;
 const SAMPLE_TABLE_MARKER = 'cloudflare-samples-v1';
 
 /** SQLite chunks keep the legacy 10,000-sample state clear of per-value limits. */
 export class MonitorStorage {
-  constructor(storage) {
+  constructor(storage, { now = Date.now } = {}) {
     this.storage = storage;
     this.sql = storage.sql;
     this.sql.exec(`CREATE TABLE IF NOT EXISTS monitor_documents (
@@ -18,6 +20,8 @@ export class MonitorStorage {
     this.sampleBlocks = null;
     this.sampleGroups = null;
     this.documentChunks = new Map();
+    this.trends = new RestockArchive(this.sql, { now });
+    this.trendMetadata = undefined;
   }
 
   documentRows(name) {
@@ -32,15 +36,31 @@ export class MonitorStorage {
   }
 
   read(name, fallback = null) {
-    const rows = this.documentRows(name);
-    if (!rows.length) return structuredClone(fallback);
-    const value = JSON.parse(rows.map((row) => row.value).join(''));
+    const value = this.readDocument(name, fallback);
     if (name === 'state' && value?.checkSamples?.storage === SAMPLE_TABLE_MARKER) {
       value.checkSamples = [...this.samples().values()]
         .sort((left, right) => left.position - right.position)
         .map((row) => JSON.parse(row.value));
     }
     return value;
+  }
+
+  readDocument(name, fallback = null) {
+    const rows = this.documentRows(name);
+    if (!rows.length) return structuredClone(fallback);
+    return JSON.parse(rows.map((row) => row.value).join(''));
+  }
+
+  archiveMetadata() {
+    if (this.trendMetadata === undefined) this.trendMetadata = this.readDocument('trend-meta');
+    return this.trendMetadata;
+  }
+
+  getTrends(options = {}) {
+    const metadata = this.archiveMetadata();
+    const day = Math.floor((this.trends.now() + 9 * 3600000) / 86400000);
+    if (!metadata || metadata.lastPrunedDay !== day) this.write({}, { initializeTrends: true });
+    return this.trends.summarize(this.trendMetadata, options);
   }
 
   samples() {
@@ -74,7 +94,7 @@ export class MonitorStorage {
     return this.sampleRows;
   }
 
-  write(documents) {
+  write(documents, { initializeTrends = false } = {}) {
     // Serialize first: a bad value must not leave a partially replaced document.
     let nextSamples;
     const serialized = Object.entries(documents).map(([name, value]) => {
@@ -92,7 +112,18 @@ export class MonitorStorage {
     const prepared = nextSamples ? this.prepareSampleBlocks(nextSamples) : null;
     const nextBlocks = prepared?.blocks;
     const nextDocuments = new Map();
+    const hasState = Object.hasOwn(documents, 'state');
+    const metadata = hasState || initializeTrends ? this.archiveMetadata() : null;
+    const archivePlan = hasState || initializeTrends ? this.trends.prepare(
+      hasState ? documents.state : this.readDocument('state', {}),
+      metadata, metadata ? null : this.readDocument('state', {}),
+    ) : null;
+    let nextMetadata;
     this.storage.transactionSync(() => {
+      if (archivePlan) {
+        nextMetadata = this.trends.apply(archivePlan);
+        serialized.push(['trend-meta', JSON.stringify(nextMetadata)]);
+      }
       if (nextSamples) {
         for (const [key, row] of nextBlocks) {
           if (this.sampleBlocks.get(key)?.value !== row.value) {
@@ -126,6 +157,7 @@ export class MonitorStorage {
     });
     // Publish caches only after the whole transaction succeeds, including status.
     for (const [name, rows] of nextDocuments) this.documentChunks.set(name, rows);
+    if (nextMetadata) this.trendMetadata = nextMetadata;
     if (nextSamples) {
       this.sampleRows = nextSamples;
       this.sampleBlocks = nextBlocks;

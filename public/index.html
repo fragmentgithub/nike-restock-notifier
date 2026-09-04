@@ -30,9 +30,12 @@
             </label>
             <label>期間
               <select id="trendPeriod" disabled>
-                <option value="all">保存履歴すべて</option>
+                <option value="all">保存履歴すべて（最大2年）</option>
                 <option value="7">直近7日</option>
                 <option value="30">直近30日</option>
+                <option value="90">直近90日</option>
+                <option value="365">直近1年</option>
+                <option value="730">直近2年</option>
               </select>
             </label>
           </div>
@@ -40,11 +43,12 @@
         <div class="metric-grid trend-metrics">
           <div><span>対象の入荷検出</span><strong id="trendTotal">-</strong></div>
           <div><span>最多の時間帯</span><strong id="trendPeak">-</strong></div>
-          <div><span>保存されている履歴の期間</span><strong id="trendRange">-</strong></div>
+          <div><span>保存されている入荷検出の期間</span><strong id="trendRange">-</strong></div>
         </div>
         <p class="trend-message" id="trendMessage" role="status" aria-live="polite">履歴を読み込み中です。</p>
         <div class="trend-chart" id="trendChart" role="img" aria-label="入荷検出時刻のグラフを読み込み中" aria-describedby="trendNote"></div>
-        <p class="hint" id="trendNote">同じ商品・同時刻の入荷検出を、サイズ数にかかわらず1件として集計。実際の補充時刻とはずれる場合があります。保存履歴の範囲に限られ、期間全体の記録や将来の入荷予測を示すものではありません。</p>
+        <p class="hint" id="trendNote">同じ商品・同時刻の入荷検出を、サイズ数にかかわらず1件として集計。実際の補充時刻とはずれる場合があり、期間全体の記録や将来の入荷予測を示すものではありません。</p>
+        <p class="hint" id="trendRetention">履歴は最大2年（730日）保存します。長期保存の開始時は残っていた履歴だけを取り込み、それ以前の欠けた履歴は復元できません。</p>
       </section>
 
       <section class="layout">

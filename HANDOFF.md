@@ -2,27 +2,58 @@
 
 ## 現在の方針（2026-09-05、過去の方針より優先）
 
-**ページは非公開。ページは重要ではなく、過度な作り込みは不要。監視・通知ロジックの正確さと効率を優先する。** 公開画面・GitHub Pages・移転案内を復活させない。
+**ページは本人限定。Cloudflare上でPCがオフでも閲覧でき、長期リストックトレンドを確認する。** 過度な作り込みを避け、監視・通知ロジックの正確さと効率を優先する。一般公開画面・GitHub Pages・移転案内を復活させない。
 
-## 最新の品質改善とデプロイ（2026-09-05）
+## 最新変更：本人限定Cloudflareページと長期トレンド
 
-コード `a376b3f` をCloudflareへ反映済み。現在のWorkers versionは `f8b9a6c9-9cde-4826-8519-7364e55da008`。SNKRSの商品全体の売切れより残存SKU在庫が優先される誤判定、履歴ブロックの解析失敗後に途中までの履歴を再利用する不具合、古い・不正・在庫不明のステータス表示を修正した。保存形式とDO識別名は変更していない。
+閲覧URLは `https://nike-restock-viewer.only-this-moment.workers.dev`。Cloudflare Accessの本人メール限定ポリシーとメールOTPで認証する。本人の実メールアドレスをリポジトリに記載しない。PCを停止してもCloudflareの監視・保存・閲覧は継続する。
+
+閲覧Worker `nike-restock-viewer` は `wrangler.viewer.jsonc` / `src/viewer-worker.js`。`ACCESS_AUD` と `VIEWER_EMAIL` を閲覧WorkerのSecretに設定し、runtimeが検証した `ctx.access` のaudience・メールを一致確認する。設定なし・未認証・本人以外は全ページ/静的ファイル/APIで拒否する。`ADMIN_TOKEN` と `DISCORD_WEBHOOK` は閲覧Workerへ渡さない。
+
+監視Workerの名前付きservice entrypoint `MonitorViewer` は `getStatus` と `getTrends` だけを公開する。閲覧Workerのservice bindingはこのentrypointを指定し、モード変更・import・内部state exportを呼べない。静的ファイルは `scripts/build-viewer-assets.js` で固定5ファイルだけをバンドルする。Static Assets routerは `ctx.access` を渡さないため使わず、プレビューURLも無効化する。`public/status.json` をビルドへ含めない。
+
+長期保存は `src/worker-trend-storage.js` と `src/worker-storage.js`。入荷検出イベントを `monitor_restock_events` に同一商品+UTC時刻で重複排除して保存し、通常state/status保存と同じtransactionで差分追加する。短期ring・通知済みキーは維持する。checkpointはchunk対応の `trend-meta` 文書で、cold/warmとも変化なし保存時にarchive全体を読み込んだり再INSERTしたりしない。
+
+保持は最大730日・100万件。期限削除は原則1日1回、集計の期間判定は毎回適用する。上限到達時は最古から整理し、注記する。`getTrends({styleColor:'all'|商品コード, days:'all'|7|30|90|365|730})` はSQLでJST24時間帯を集計する。商品候補は最大1000件だが全商品集計には省略商品も含む。
+
+最初の閲覧またはstate保存で、既存の全体最大300件・商品別最大60件の短期履歴を自動backfillする。最初がstate置換でも置換前の履歴を先に取り込む。保存開始前の全履歴が揃うわけではないため、返却の `period.archiveStartedAt` / `notes.retentionLabel` に実保存開始日と部分記録の注記を含める。保存期間や検出時刻は連続監視や実際の補充時刻を保証しない。
+
+現在の `state` exportは監視状態のみで、独立した長期archiveを含まない。`trends` 出力は集計結果であり個別イベントのバックアップではない。通常のstate importでは既存archiveを消さない。DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` を維持し、DOを作り直さない。
+
+263テスト成功。実Miniflare/WorkerdでAccessの本人/他人/未設定/偽装拒否、読み取り専用service binding、全6期間のSQL集計、getTrends前後の1万件サンプル・通知キー・短期履歴の一致を確認した。本番秘密値は使わず、外部通信は遮断している。100万件の保持上限とtransaction rollbackもNode SQLiteで検証済み。
+
+### 最新デプロイの反映後確認
+
+| 項目 | 結果 |
+| --- | --- |
+| 監視Worker version | `bd8bfc88-cbc9-4662-a914-e38a26f81836` |
+| 閲覧Worker version | `757feccd-d645-4b4e-9fc5-876b27773bcf` |
+| 本人限定Access設定・本人以外の拒否 | 本人メールだけの許可ポリシー、HttpOnly・binding cookie設定を確認。未認証の `/`・`/app.js`・`/status.json`・`/api/trends`・`/admin/state` はすべてAccessログインへ302。 |
+| 本人ログイン後のページ・トレンド | 本人の実ログインは未確認。ブラウザー操作連携がブロックされたため、ユーザーへメールOTPでのログインを依頼中。ローカル画面では全履歴14件・4時台6件を確認。 |
+| active/通知キー/履歴/長期集計の保持・自動監視 | healthy/activeを維持。8商品の通知キーと商品別履歴、全体履歴28件が反映前後で完全一致。長期archiveは入荷14件。現行4商品の反映後の自動取得成功を確認。 |
+
+長期保存開始は `2026-09-04T17:32:38.089Z`（日本時間2026-09-05 02:32:38.089）。監視Workerの未認証status・health・trendsは401を確認した。263テストと実Workerd検証も再実行して成功している。本人の認証済みブラウザー表示を確認するまでは、その項目だけ完了扱いにしない。
+
+## 前回の品質改善とデプロイ（2026-09-05、履歴）
+
+前回はコード `a376b3f` をCloudflareへ反映し、Workers versionは `f8b9a6c9-9cde-4826-8519-7364e55da008` だった。SNKRSの商品全体の売切れより残存SKU在庫が優先される誤判定、履歴ブロックの解析失敗後に途中までの履歴を再利用する不具合、古い・不正・在庫不明のステータス表示を修正した。当時は保存形式とDO識別名を変更していない。
 
 232テスト、ビルド、実Workerdでの認証とSQLite1万件保持、ブラウザー表示確認に成功。CI `33899418301` も成功。実Workerd検証は `npm run cloudflare:test` で再実行でき、CIに追加済み。本番キーを使わず、外部通信はモックで遮断する。
 
 反映前後でactiveモード、8商品の通知済みキー・商品別履歴、全体履歴28件、設定の保持を確認。未認証の静的ページ404、status/health/adminstatusの401を再確認し、デプロイ後の現行4商品の自動取得成功とエラー0件も確認済み。認証付きhealth run `33899583152` は成功。非公開バックアップは `.cloudflare-migration/quality-deploy-before-state.json` に保存した。
 
-## 非公開閲覧ページ
+## 従来のローカル閲覧ページとの互換
 
-追加依頼により、`npm start` で開くこの端末専用ページ（`http://127.0.0.1:4173/`）にリストック時間帯トレンドを用意した。Cloudflareの閲覧用ステータスをローカルサーバーが管理認証付きで取得し、管理キーはブラウザーへ渡さない。公開配信は復活させていない。`public/restock-trends.js` が全体・商品別履歴を重複排除して日本時間で集計し、`public/trend-view.js` が商品・7日・30日・保存履歴全体の切り替えを表示する。入荷検出の記録であり、補充時刻の断定や予測ではない。
+`npm start` で開く端末専用ページ（`http://127.0.0.1:4173/`）も維持する。`scripts/serve-pages.js` は固定Cloudflare APIからステータスと長期集計を管理認証付きで取得し、キーはブラウザーへ渡さない。ループバック限定で、成功結果の60秒キャッシュ・同時取得共有・timeout/サイズ制限・古いローカルsnapshotへの代用禁止を維持する。PCを停止するとこのURLは使えないが、Cloudflare側の本人限定ページは使える。
 
-追加後は223テスト成功。実ブラウザーで全履歴14件・4時台6件、商品変更、期間外の0件表示を確認した。管理キーがローカルHTTP応答に含まれないことも検証済み。閲覧機能のみの変更なので、Cloudflareの再デプロイは不要。
+`public/trend-view.js` は `/api/trends` のサーバー集計を使う。商品・全6期間の切り替え、条件と応答の照合、遅い旧応答の無視、同条件の前回集計に限った失敗時表示を実装する。`public/restock-trends.js` の旧短期集計関数は互換用に残るが、長期トレンドの現行データソースではない。以前のローカル表示確認では全履歴14件・4時台6件だったが、固定の現在値として扱わない。
 
-初回の本番移行では、Cloudflare Workers + SQLite Durable Objectへの移行、非公開化とロジック最適化を反映した（当時のWorkers version `b17f5fc9-18cc-40f9-9bc8-94232735457e`）。旧GitHub Pages削除と旧URLの404、Cloudflareの静的ページ404・未認証のstatus/health/adminstatusへの401を確認した。認証付きhealth run `33897075825` とCI run `33897048497`、当時の206テストは成功。最新の稼働版・検証結果は上記の品質改善欄を参照。
+初回の本番移行では、Cloudflare Workers + SQLite Durable Objectへの移行、非公開化とロジック最適化を反映した（当時のWorkers version `b17f5fc9-18cc-40f9-9bc8-94232735457e`）。旧GitHub Pages削除と旧URLの404、Cloudflareの静的ページ404・未認証のstatus/health/adminstatusへの401を確認した。認証付きhealth run `33897075825` とCI run `33897048497`、当時の206テストは成功。最新の稼働版・検証結果は冒頭の反映後確認欄を参照。
 
 ## 構成とアクセス
 
 - API接続先: `https://nike-restock-notifier.only-this-moment.workers.dev`。公開ページのURLとして案内しない。
+- 本人限定閲覧先: `https://nike-restock-viewer.only-this-moment.workers.dev`。Accessで本人メールOTP認証する。
 - 静的配信を削除し、`/`、`/index.html`、`/app.js` は404。`/status.json` と `/admin/status` は管理認証必須。
 - `/healthz` は `ADMIN_TOKEN` または `health.yml` に限定したGitHub OIDC認証が必要で、商品・履歴は返さない。外側healthに管理キーを登録しない。
 - `pages.yml` と旧移転案内の生成処理は削除済み。`public/status.json` はGit管理から除外し、ローカルに残す。
@@ -43,12 +74,15 @@
 ```powershell
 node scripts/cloudflare-admin.js health
 node scripts/cloudflare-admin.js status .cloudflare-migration/status-private.json
+node scripts/cloudflare-admin.js trends .cloudflare-migration/trends-private.json
 node scripts/cloudflare-admin.js state .cloudflare-migration/state-backup.json
 ```
 
 操作ツールは `ADMIN_TOKEN` 環境変数または `.cloudflare-migration/admin-token` を読む。`.cloudflare-migration/` はGit対象外の作業領域。管理キー・秘密鍵・内部状態を公開・ログ出力しない。既存キーを作り直さない。
 
 `mode paused` は確認・通知の終了を待って停止し、`mode shadow` は通知なし、`mode active` は本番監視。状態importはpaused限定。詳細は [CLOUDFLARE.md](CLOUDFLARE.md)。
+
+検証は `npm test`、`npm run cloudflare:build`、`npm run viewer:build`、`npm run cloudflare:test`。監視側の `MonitorViewer` を先に反映し、閲覧側を続ける。Accessポリシー・audience・本人メールSecretを維持し、反映後確認欄は実際の結果で更新する。
 
 ## Cloudflare移行の記録（完了済み）
 

@@ -14,7 +14,10 @@
     "cloudflare:deploy": "wrangler deploy",
     "cloudflare:types": "wrangler types",
     "cloudflare:admin": "node scripts/cloudflare-admin.js",
-    "cloudflare:test": "node scripts/test-cloudflare-runtime.js"
+    "cloudflare:test": "node scripts/test-cloudflare-runtime.js",
+    "viewer:build": "node scripts/build-viewer-assets.js && wrangler deploy --config wrangler.viewer.jsonc --dry-run --outdir dist/viewer",
+    "viewer:deploy": "node scripts/build-viewer-assets.js && wrangler deploy --config wrangler.viewer.jsonc --keep-vars",
+    "pretest": "node scripts/build-viewer-assets.js"
   },
   "engines": {
     "node": ">=24"

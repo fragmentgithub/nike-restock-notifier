@@ -44,11 +44,31 @@ function fixture(t, { engineFactory, env = {}, probe } = {}) {
 test('all admin routes fail closed without the configured secret or with a wrong token', async () => {
   let calls = 0;
   const env = { MONITOR: { getByName: () => { calls++; } } };
-  for (const path of ['/admin/state', '/admin/health', '/admin/import', '/admin/mode', '/admin/probe', '/admin/migration-credential']) {
+  for (const path of ['/admin/state', '/admin/health', '/admin/trends', '/admin/import', '/admin/mode', '/admin/probe', '/admin/migration-credential']) {
     assert.equal((await handleWorkerRequest(request(path), env)).status, 401);
     assert.equal((await handleWorkerRequest(request(path, { token: 'wrong' }), { ...env, ADMIN_TOKEN })).status, 401);
   }
   assert.equal(calls, 0);
+});
+
+test('private trends validate filters and aggregate archived events without exposing state', async (t) => {
+  const { controller, bindings } = fixture(t);
+  await controller.importState({ state: {
+    history: [{ styleColor: 'HQ4307-005', at: new Date(NOW - 86400000).toISOString(), added: ['26', '27'] }],
+  } });
+  const response = await handleWorkerRequest(request('/admin/trends?days=730&styleColor=hq4307-005'), bindings);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const data = await response.json();
+  assert.equal(data.totalEvents, 1);
+  assert.equal(data.hours[9].count, 1);
+  assert.equal(data.period.days, 730);
+  assert.equal(data.notes.retentionDays, 730);
+  assert.equal(data.history, undefined);
+  for (const query of ['days=731', 'days=', 'days=7&days=30', 'styleColor=all&styleColor=HQ4307-005', 'admin=true', 'styleColor=invalid']) {
+    assert.equal((await handleWorkerRequest(request(`/admin/trends?${query}`), bindings)).status, 400);
+  }
+  assert.equal((await handleWorkerRequest(request('/admin/trends', { method: 'POST' }), bindings)).status, 405);
 });
 
 test('migration transfer rejects an admin credential and unsigned tokens before reading or importing data', async () => {

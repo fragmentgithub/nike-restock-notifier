@@ -39,6 +39,7 @@ async function refreshState() {
   if (refreshInFlight) return;
 
   refreshInFlight = true;
+  void trendView.refresh();
   appShell.setAttribute('aria-busy', 'true');
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
@@ -145,7 +146,7 @@ function render(state) {
   renderQuality(state.metrics || {}, { stale });
   renderStockHistory(state.history || []);
   renderEvents(state.events || []);
-  trendView.render(state, { stale });
+  trendView.setMonitorStatus({ stale });
 }
 
 function validateStatusPayload(state) {
@@ -185,7 +186,7 @@ function isRecord(value) {
 }
 
 function renderUnavailable(message, { preserveData = false } = {}) {
-  trendView.unavailable({ preserveData });
+  trendView.setMonitorStatus({ unavailable: true });
   setText(runStatus, '取得失敗');
   runStatus.className = 'status-pill error';
   setText(checkStatus, preserveData ? '更新エラー' : 'エラー');

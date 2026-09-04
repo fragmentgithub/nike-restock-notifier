@@ -32,5 +32,8 @@ jobs:
       - name: Validate Cloudflare deployment
         run: npm run cloudflare:build
 
-      - name: Verify private Worker and SQLite state in the Cloudflare runtime
+      - name: Validate the private viewer bundle
+        run: npm run viewer:build
+
+      - name: Verify private viewer authentication, read-only RPC and SQLite state in the Cloudflare runtime
         run: npm run cloudflare:test

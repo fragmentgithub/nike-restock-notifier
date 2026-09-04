@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nike-restock-viewer",
+  "account_id": "9fdb82631b485444862476ea3d8007f3",
+  "main": "src/viewer-worker.js",
+  "compatibility_date": "2026-09-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "build": { "command": "node scripts/build-viewer-assets.js" },
+  "services": [
+    { "binding": "MONITOR_VIEWER", "service": "nike-restock-notifier", "entrypoint": "MonitorViewer" }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

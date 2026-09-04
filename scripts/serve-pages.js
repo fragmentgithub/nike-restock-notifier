@@ -6,6 +6,9 @@ import { scrubDiscordWebhook } from '../src/discord.js';
 
 const projectDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const STATUS_URL = 'https://nike-restock-notifier.only-this-moment.workers.dev/admin/status';
+const TRENDS_URL = 'https://nike-restock-notifier.only-this-moment.workers.dev/admin/trends';
+const TREND_PERIODS = new Set(['all', '7', '30', '90', '365', '730']);
+const STYLE_COLOR_PATTERN = /^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/;
 const STATIC_FILES = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['index.html', 'text/html; charset=utf-8']],
@@ -38,11 +41,13 @@ export function createPagesServer({
 } = {}) {
   let cache;
   let inFlight;
+  const trendCache = new Map();
+  const trendInFlight = new Map();
 
   async function statusBody() {
     if (cache && now() < cache.expiresAt) return cache.body;
     if (inFlight) return inFlight;
-    inFlight = fetchStatus({ loadToken, fetchImpl, timeoutMs, maxBytes }).then((body) => {
+    inFlight = fetchPrivateJson({ url: STATUS_URL, validate: validStatus, loadToken, fetchImpl, timeoutMs, maxBytes }).then((body) => {
       cache = { body, expiresAt: now() + cacheMs };
       return body;
     }).catch(() => {
@@ -51,6 +56,24 @@ export function createPagesServer({
       throw new Error('Live status unavailable');
     }).finally(() => { inFlight = null; });
     return inFlight;
+  }
+
+  async function trendBody(filters) {
+    const query = new URLSearchParams(filters).toString();
+    const cached = trendCache.get(query);
+    if (cached && now() < cached.expiresAt) return cached.body;
+    trendCache.delete(query);
+    if (trendInFlight.has(query)) return trendInFlight.get(query);
+    const pending = fetchPrivateJson({
+      url: `${TRENDS_URL}?${query}`, validate: (data) => validTrends(data, filters),
+      loadToken, fetchImpl, timeoutMs, maxBytes,
+    }).then((body) => {
+      trendCache.set(query, { body, expiresAt: now() + cacheMs });
+      if (trendCache.size > 64) trendCache.delete(trendCache.keys().next().value);
+      return body;
+    }).finally(() => { trendInFlight.delete(query); });
+    trendInFlight.set(query, pending);
+    return pending;
   }
 
   const server = createServer({ maxHeaderSize: 8192, headersTimeout: 10000, requestTimeout: 20000 }, async (request, response) => {
@@ -69,17 +92,16 @@ export function createPagesServer({
       reply(request, response, 405, 'Method not allowed', { allow: 'GET, HEAD' });
       return;
     }
-    let pathname;
+    let url;
     try {
       if (!request.url?.startsWith('/') || request.url.startsWith('//')) throw new Error('Invalid target');
-      const url = new URL(request.url, origin);
+      url = new URL(request.url, origin);
       if (url.origin !== origin) throw new Error('Invalid target');
-      pathname = url.pathname;
     } catch {
       reply(request, response, 400, 'Bad request');
       return;
     }
-    if (pathname === '/status.json') {
+    if (url.pathname === '/status.json') {
       try {
         reply(request, response, 200, await statusBody(), { 'content-type': 'application/json; charset=utf-8' });
       } catch {
@@ -89,7 +111,19 @@ export function createPagesServer({
       }
       return;
     }
-    const file = STATIC_FILES.get(pathname);
+    if (url.pathname === '/api/trends') {
+      const filters = trendFilters(url.searchParams);
+      if (!filters) { reply(request, response, 400, 'Invalid trend filters'); return; }
+      try {
+        reply(request, response, 200, await trendBody(filters), { 'content-type': 'application/json; charset=utf-8' });
+      } catch {
+        reply(request, response, 503, JSON.stringify({
+          error: '長期集計を取得できませんでした。しばらくしてから再読み込みしてください。',
+        }), { 'content-type': 'application/json; charset=utf-8' });
+      }
+      return;
+    }
+    const file = STATIC_FILES.get(url.pathname);
     if (!file) { reply(request, response, 404, 'Not found'); return; }
     try {
       const body = await readFile(path.join(publicDirectory, file[0]));
@@ -103,7 +137,39 @@ async function readAdminToken() {
   return process.env.ADMIN_TOKEN || readFile(path.join(projectDirectory, '.cloudflare-migration', 'admin-token'), 'utf8');
 }
 
-async function fetchStatus({ loadToken, fetchImpl, timeoutMs, maxBytes }) {
+function trendFilters(params) {
+  if ([...params.keys()].some((key) => !['styleColor', 'days'].includes(key)) ||
+      params.getAll('styleColor').length > 1 || params.getAll('days').length > 1) return null;
+  const styleColor = params.get('styleColor') ?? 'all';
+  const days = params.get('days') ?? 'all';
+  if ((styleColor !== 'all' && !STYLE_COLOR_PATTERN.test(styleColor)) || !TREND_PERIODS.has(days)) return null;
+  return { styleColor, days };
+}
+
+function validStatus(data) {
+  return data && typeof data === 'object' && !Array.isArray(data) &&
+    Array.isArray(data.products) && Number.isFinite(Date.parse(data.updatedAt || ''));
+}
+
+function validTrends(data, filters) {
+  if (!data || data.timezone !== 'Asia/Tokyo' || data.styleColor !== filters.styleColor ||
+      String(data.period?.days) !== filters.days ||
+      !Number.isSafeInteger(data.totalEvents) || data.totalEvents < 0 ||
+      !Array.isArray(data.products) || !data.products.every((code) =>
+        typeof code === 'string' && STYLE_COLOR_PATTERN.test(code)) ||
+      !Array.isArray(data.hours) || data.hours.length !== 24) return false;
+  const hours = new Set();
+  let count = 0;
+  for (const item of data.hours) {
+    if (!item || !Number.isInteger(item.hour) || item.hour < 0 || item.hour > 23 ||
+        !Number.isSafeInteger(item.count) || item.count < 0 || hours.has(item.hour)) return false;
+    hours.add(item.hour);
+    count += item.count;
+  }
+  return count === data.totalEvents;
+}
+
+async function fetchPrivateJson({ url, validate, loadToken, fetchImpl, timeoutMs, maxBytes }) {
   const controller = new AbortController();
   let reader;
   let timer;
@@ -119,7 +185,7 @@ async function fetchStatus({ loadToken, fetchImpl, timeoutMs, maxBytes }) {
       const token = String(await loadToken()).trim();
       if (!token || token.length > 2048 || /[\r\n]/.test(token)) throw new Error('Admin credential unavailable');
       controller.signal.throwIfAborted();
-      const response = await fetchImpl(STATUS_URL, {
+      const response = await fetchImpl(url, {
         method: 'GET', headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
         redirect: 'error', signal: controller.signal,
       });
@@ -138,8 +204,7 @@ async function fetchStatus({ loadToken, fetchImpl, timeoutMs, maxBytes }) {
         chunks.push(value);
       }
       const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (!data || typeof data !== 'object' || Array.isArray(data) ||
-          !Array.isArray(data.products) || !Number.isFinite(Date.parse(data.updatedAt || ''))) {
+      if (!validate(data)) {
         throw new Error('Invalid live status');
       }
       return JSON.stringify(data, (key, value) => {

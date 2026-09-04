@@ -6,7 +6,7 @@ const base = new URL(process.env.CLOUDFLARE_MONITOR_URL || DEFAULT_URL);
 if (base.protocol !== 'https:' || base.username || base.password) throw new Error('An HTTPS Worker URL is required');
 const token = String(process.env.ADMIN_TOKEN || await readFile('.cloudflare-migration/admin-token', 'utf8')).trim();
 if (!token) throw new Error('ADMIN_TOKEN is required');
-const routes = { health: 'health', status: 'status', state: 'state', mode: 'mode', probe: 'probe', import: 'import', credential: 'migration-credential', 'clear-credential': 'migration-credential' };
+const routes = { health: 'health', status: 'status', trends: 'trends', state: 'state', mode: 'mode', probe: 'probe', import: 'import', credential: 'migration-credential', 'clear-credential': 'migration-credential' };
 if (!routes[command]) throw new Error('Use health, state, mode, probe, or import');
 let payload;
 if (command === 'mode') {
@@ -44,7 +44,7 @@ if (command === 'credential') {
   if (!argument) throw new Error('Encrypted credential export requires an output file path');
   await writeFile(argument, Buffer.from(result.encryptedWebhook, 'base64'));
   console.log('Encrypted migration credential downloaded.');
-} else if (command === 'state' || command === 'status') {
+} else if (command === 'state' || command === 'status' || command === 'trends') {
   if (!argument) throw new Error('State export requires an output file path');
   await writeFile(argument, JSON.stringify(result, null, 2));
   console.log('Private monitor state exported.');
