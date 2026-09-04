@@ -214,6 +214,7 @@ test('one million retained events enforce the capacity bound by evicting only th
     SELECT ?, ? - value FROM sequence`).run(FIRST, NOW);
   const metadata = documents.read('trend-meta');
   metadata.eventCount = 1000000;
+  metadata.verifiedFrom = iso(NOW - 1000000);
   database.prepare("UPDATE monitor_documents SET value = ? WHERE name = 'trend-meta'").run(JSON.stringify(metadata));
   const cold = new MonitorStorage(storage, options);
   await cold.commit({ state: { history: [event(NOW)] } });
@@ -225,4 +226,86 @@ test('one million retained events enforce the capacity bound by evicting only th
   assert.equal(summary.totalEvents, 1000000);
   assert.equal(summary.notes.capacityLimited, true);
   assert.match(summary.notes.retentionLabel, /上限に達した/);
+});
+
+test('an old evidence revision upgrades once while retaining but excluding earlier rows', async (t) => {
+  const { documents, storage, options, database, setNow, rowCount } = fixture(t);
+  await documents.commit({ state: { history: [event(NOW - 2000), event(NOW - 1000)] } });
+  const legacyMetadata = documents.read('trend-meta');
+  delete legacyMetadata.evidenceRevision;
+  delete legacyMetadata.verifiedFrom;
+  database.prepare("UPDATE monitor_documents SET value = ? WHERE name = 'trend-meta' AND part = 0")
+    .run(JSON.stringify(legacyMetadata));
+
+  const boundary = NOW + 60000;
+  setNow(boundary);
+  const upgraded = new MonitorStorage(storage, options);
+  let summary = upgraded.getTrends({ days: 7 });
+  assert.equal(rowCount(), 2);
+  assert.equal(summary.totalEvents, 0);
+  assert.equal(summary.period.excludedUnverifiedEvents, 2);
+  assert.equal(summary.period.verifiedFrom, iso(boundary));
+  assert.equal(summary.period.evidenceRevision, 2);
+  assert.match(summary.notes.verificationLabel, /それ以前の2件は保存したまま集計から除外/);
+
+  await upgraded.commit({ state: { history: [event(boundary), event(NOW - 1000)] } });
+  setNow(boundary + 60000);
+  summary = new MonitorStorage(storage, options).getTrends({ days: 7 });
+  assert.equal(rowCount(), 3);
+  assert.equal(summary.totalEvents, 1);
+  assert.equal(summary.period.excludedUnverifiedEvents, 2);
+  assert.equal(summary.period.verifiedFrom, iso(boundary));
+});
+
+test('an evidence upgrade includes the same commit new-parser event', async (t) => {
+  const { documents, storage, options, database, setNow, rowCount } = fixture(t);
+  const oldEvents = [event(NOW - 2000), event(NOW - 1000)];
+  await documents.commit({ state: { history: oldEvents } });
+  const legacyMetadata = documents.read('trend-meta');
+  delete legacyMetadata.evidenceRevision;
+  delete legacyMetadata.verifiedFrom;
+  database.prepare("UPDATE monitor_documents SET value = ? WHERE name = 'trend-meta' AND part = 0")
+    .run(JSON.stringify(legacyMetadata));
+
+  const observedAt = NOW + 60000;
+  setNow(observedAt + 25);
+  const upgraded = new MonitorStorage(storage, options);
+  await upgraded.commit({ state: { history: [event(observedAt), ...oldEvents] } }, {
+    observation: {
+      styleColor: FIRST, observedAt: iso(observedAt), availability: 'in_stock',
+      expectedIntervalSeconds: 120, restockDetected: true,
+    },
+  });
+  let summary = upgraded.getTrends({ days: 7 });
+  assert.equal(rowCount(), 3);
+  assert.equal(summary.period.verifiedFrom, iso(observedAt));
+  assert.equal(summary.totalEvents, 1);
+  assert.equal(summary.period.excludedUnverifiedEvents, 2);
+});
+
+test('an old normalized observation cannot move an evidence upgrade boundary into existing history', async (t) => {
+  const { documents, storage, options, database, setNow, rowCount } = fixture(t);
+  const oldEvents = [event(NOW - 2000), event(NOW - 1000)];
+  await documents.commit({ state: { history: oldEvents } });
+  const legacyMetadata = documents.read('trend-meta');
+  delete legacyMetadata.evidenceRevision;
+  delete legacyMetadata.verifiedFrom;
+  database.prepare("UPDATE monitor_documents SET value = ? WHERE name = 'trend-meta' AND part = 0")
+    .run(JSON.stringify(legacyMetadata));
+
+  const commitAt = NOW + 60000;
+  const staleObservation = NOW - 10 * 60000;
+  setNow(commitAt);
+  const cold = new MonitorStorage(storage, options);
+  await cold.commit({ state: { history: [event(staleObservation, SECOND), ...oldEvents] } }, {
+    observation: {
+      styleColor: SECOND, observedAt: iso(staleObservation), availability: 'in_stock',
+      expectedIntervalSeconds: 120, restockDetected: true,
+    },
+  });
+  const summary = cold.getTrends({ days: 7 });
+  assert.equal(rowCount(), 3);
+  assert.equal(summary.period.verifiedFrom, iso(commitAt));
+  assert.equal(summary.totalEvents, 0);
+  assert.equal(summary.period.excludedUnverifiedEvents, 3);
 });

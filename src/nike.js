@@ -2,6 +2,7 @@ import { extractNikeMind001Products, normalizeNikeProductUrl } from './discovery
 import { errorMessage, fetchWithTimeout, firstPresent, parseNextData } from './util.js';
 
 const NIKE_CHANNEL_ID = 'd9a5bc42-4b9c-4976-858a-f159cf99c647';
+const NIKE_API_CALLER_ID = 'com.nike.commerce.nikedotcom.web';
 
 const MARKETPLACE_BY_PATH = new Map([
   ['jp', { marketplace: 'JP', language: 'ja' }],
@@ -124,9 +125,9 @@ export async function checkNikeStock(productUrl, options = {}) {
       throw new Error('Nikeの商品データをページから読み取れませんでした');
     }
     const relatedProducts = extractNikeMind001Products(html, productRef.url, { nextData });
-
-    return {
-      ...parsed,
+    const { availabilityRef, ...publicParsed } = parsed;
+    const pageResult = {
+      ...publicParsed,
       ok: true,
       checkedAt: new Date().toISOString(),
       source: parsed.source || 'nike-product-page',
@@ -135,6 +136,19 @@ export async function checkNikeStock(productUrl, options = {}) {
       notFound: false,
       errors,
     };
+    if (availabilityRef?.requiresConfirmation) {
+      return confirmNextProductAvailability({
+        pageResult,
+        availabilityRef,
+        productRef,
+        sizeFilters,
+        html,
+        timeoutMs,
+        fetchImpl,
+        errors,
+      });
+    }
+    return pageResult;
   } catch (error) {
     errors.push(`${errorMessage(error)}: ${productRef.url}`);
   }
@@ -196,6 +210,128 @@ export async function checkNikeStock(productUrl, options = {}) {
     releaseAt: null,
     relatedProducts: [],
     notFound: explicitNotFound,
+    errors,
+  };
+}
+
+async function confirmNextProductAvailability({
+  pageResult,
+  availabilityRef,
+  productRef,
+  sizeFilters,
+  html,
+  timeoutMs,
+  fetchImpl,
+  errors,
+}) {
+  const uiResult = availabilityRef.allowsPdpUiFallback
+    ? parsePdpPurchaseControls(html, pageResult, sizeFilters)
+    : null;
+  const endpoint = buildProductAvailabilityUrl(productRef, availabilityRef.groupKey);
+  if (!endpoint) {
+    errors.push('商品ページから在庫APIのgroupKeyを読み取れませんでした');
+    return uiResult || unconfirmedNextInventoryResult(pageResult, errors, true);
+  }
+
+  try {
+    const response = await fetchWithTimeout(endpoint, {
+      headers: { ...DEFAULT_HEADERS, 'nike-api-caller-id': NIKE_API_CALLER_ID },
+      timeoutMs,
+      fetchImpl,
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+
+    const payload = await response.json();
+    const confirmed = parseProductAvailability(payload, availabilityRef, pageResult, sizeFilters);
+    if (confirmed && confirmed.availabilityState !== 'unknown') {
+      return {
+        ...pageResult,
+        ...confirmed,
+        ok: true,
+        checkedAt: new Date().toISOString(),
+        source: 'nike-product-availability-api',
+        sourceUrl: endpoint,
+        errors,
+      };
+    }
+
+    errors.push(`在庫APIの応答が商品ページと一致しませんでした: ${endpoint}`);
+    return uiResult || unconfirmedNextInventoryResult(pageResult, errors, true);
+  } catch (error) {
+    errors.push(`${errorMessage(error)}: ${endpoint}`);
+    return uiResult || unconfirmedNextInventoryResult(pageResult, errors, false);
+  }
+}
+
+function buildProductAvailabilityUrl(productRef, groupKey) {
+  const normalizedGroupKey = String(groupKey || '').trim();
+  if (!normalizedGroupKey) return '';
+  return `https://api.nike.com/discover/product_details_availability/v1/marketplace/${encodeURIComponent(productRef.marketplace)}/language/${encodeURIComponent(productRef.language)}/consumerChannelId/${encodeURIComponent(NIKE_CHANNEL_ID)}/groupKey/${encodeURIComponent(normalizedGroupKey)}`;
+}
+
+function parseProductAvailability(payload, availabilityRef, pageResult, sizeFilters) {
+  if (payload?.groupKey && String(payload.groupKey) !== String(availabilityRef.groupKey)) return null;
+  const expectedProductId = String(availabilityRef.globalProductId || '');
+  const expectedSkuIds = new Set(asArray(availabilityRef.merchSkuIds).map(String).filter(Boolean));
+  const responseSizes = asArray(payload?.sizes).filter((size) => {
+    if (expectedProductId) return String(size?.globalProductId || '') === expectedProductId;
+    if (expectedSkuIds.size) return expectedSkuIds.has(String(size?.merchSkuId || ''));
+    return String(size?.productCode || '').toUpperCase() === productRefStyle(pageResult);
+  });
+  if (!responseSizes.length) return null;
+  const responseSkuIds = new Set(responseSizes.map((size) => String(size?.merchSkuId || '')).filter(Boolean));
+  if (expectedSkuIds.size && [...expectedSkuIds].some((id) => !responseSkuIds.has(id))) return null;
+
+  const sizes = responseSizes.map((size) => {
+    const ship = String(size?.availability?.ship || '').toUpperCase();
+    const availability = inventoryAvailability(size?.availability?.isAvailable, ship);
+    const available = availability === true;
+    const label = firstPresent([size?.localizedLabel, size?.label, size?.merchSkuId]);
+    return {
+      id: size?.merchSkuId || size?.gtin || '',
+      label,
+      localizedSize: size?.localizedLabel || '',
+      nikeSize: size?.label || '',
+      size: size?.label || '',
+      available,
+      level: availability === null ? 'UNKNOWN' : available ? ship || 'AVAILABLE' : 'OUT_OF_STOCK',
+    };
+  });
+  const availableSizes = sizes.filter((size) => size.available);
+  const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = structuredAvailabilityState(sizes, matchingSizes);
+  return {
+    product: pageResult.product,
+    sizes,
+    availableSizes,
+    matchingSizes,
+    inStock: availabilityState === 'available',
+    statusLabel: availabilityState === 'unknown'
+      ? '在庫判定不可'
+      : statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState,
+    releaseAt: pageResult.releaseAt,
+  };
+}
+
+function productRefStyle(pageResult) {
+  return String(pageResult?.product?.styleColor || '').toUpperCase();
+}
+
+function unconfirmedNextInventoryResult(pageResult, errors, ok) {
+  return {
+    ...pageResult,
+    ok,
+    checkedAt: new Date().toISOString(),
+    sizes: pageResult.sizes.map((size) => ({ ...size, available: false, level: 'UNKNOWN' })),
+    availableSizes: [],
+    matchingSizes: [],
+    inStock: false,
+    statusLabel: '在庫判定不可',
+    availabilityState: 'unknown',
     errors,
   };
 }
@@ -525,9 +661,11 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
   const pageProps = nextData?.props?.pageProps || {};
   const groupedProduct = findProductInGroups(pageProps.productGroups, productRef.styleColor);
   const pageSelectedProduct = pageProps.selectedProduct || null;
+  const pageSelectedProductMatches =
+    String(pageSelectedProduct?.styleColor || '').toUpperCase() === productRef.styleColor;
   const selectedProduct =
     groupedProduct ||
-    (String(pageSelectedProduct?.styleColor || '').toUpperCase() === productRef.styleColor
+    (pageSelectedProductMatches
       ? pageSelectedProduct
       : null) ||
     null;
@@ -564,6 +702,7 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
   const availableSizes = sizes.filter((size) => size.available);
   const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
   const availabilityState = unavailableReason || structuredAvailabilityState(sizes, matchingSizes);
+  const requiresAvailabilityConfirmation = !productUnavailable && availableSizes.length > 0;
 
   return {
     product,
@@ -578,7 +717,25 @@ function parseNextProductData(nextData, productRef, sizeFilters) {
     availabilityState,
     releaseAt,
     source: 'nike-next-data',
+    availabilityRef: requiresAvailabilityConfirmation
+      ? {
+          requiresConfirmation: true,
+          groupKey: firstPresent([selectedProduct.groupKey, groupKeyFromSlug(pageProps.slug)]),
+          globalProductId: selectedProduct.globalProductId || '',
+          allowsPdpUiFallback: pageSelectedProductMatches,
+          merchSkuIds: asArray(selectedProduct.sizes)
+            .map((size) => size?.merchSkuId)
+            .filter(Boolean),
+        }
+      : null,
   };
+}
+
+function groupKeyFromSlug(value) {
+  const raw = firstPresent(Array.isArray(value) ? value : [value]);
+  if (!raw) return '';
+  const pathname = String(raw).split(/[?#]/, 1)[0].replace(/\/+$/, '');
+  return pathname.split('/').pop()?.split('-').pop() || '';
 }
 
 function findProductInGroups(productGroups, styleColor) {
@@ -646,7 +803,9 @@ function nextSizeAvailability(size) {
 function inventoryAvailability(available, level) {
   if (available === false || available === 'false') return false;
   if (available === true || available === 'true') return true;
-  if (['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE', 'ACTIVE', 'IN_STOCK'].includes(level)) return true;
+  // ACTIVE is also used for an enabled merch SKU with no sellable inventory. Only
+  // explicit availability or inventory-specific levels can prove it is purchasable.
+  if (['LOW', 'MEDIUM', 'HIGH', 'AVAILABLE', 'IN_STOCK'].includes(level)) return true;
   if (['OOS', 'OUT_OF_STOCK', 'SOLD_OUT', 'UNAVAILABLE', 'INACTIVE'].includes(level)) return false;
   return null;
 }
@@ -685,11 +844,57 @@ function normalizeInventoryLevel(value) {
   return level;
 }
 
-function extractSizesFromHtmlControls(html) {
-  const sizeSelectorIndex = html.search(/\bid\s*=\s*["']size-selector["']/i);
-  if (sizeSelectorIndex === -1) return [];
+function parsePdpPurchaseControls(html, pageResult, sizeFilters) {
+  const section = pdpPurchaseSection(html);
+  if (!section) return null;
+  const sizes = extractSizesFromHtmlControls(html);
+  const explicitlySoldOut = /data-testid=["']sold-out-container["']|在庫なし|売り切れ|sold\s*out|out\s*of\s*stock/i.test(section);
+  const allControlsDisabled = sizes.length > 0 && sizes.every((size) => !size.available);
+  if (explicitlySoldOut || allControlsDisabled) {
+    const unavailableSizes = (sizes.length ? sizes : pageResult.sizes)
+      .map((size) => ({ ...size, available: false, level: 'OUT_OF_STOCK' }));
+    return {
+      ...pageResult,
+      sizes: unavailableSizes,
+      availableSizes: [],
+      matchingSizes: [],
+      inStock: false,
+      statusLabel: unavailableSizes.length ? '全サイズ在庫なし' : '在庫なし',
+      availabilityState: 'out-of-stock',
+      source: 'nike-pdp-purchase-controls',
+    };
+  }
 
-  const section = html.slice(sizeSelectorIndex, sizeSelectorIndex + 50000);
+  const hasPurchaseAction = /カートに追加|バッグに追加|add\s+to\s+bag|add\s+to\s+cart|data-testid=["'][^"']*(?:add-to-(?:bag|cart)|buy)[^"']*["']/i.test(section);
+  if (!sizes.length || !hasPurchaseAction) return null;
+  const availableSizes = sizes.filter((size) => size.available);
+  const matchingSizes = availableSizes.filter((size) => sizeMatches(size, sizeFilters));
+  const availabilityState = structuredAvailabilityState(sizes, matchingSizes);
+  if (availabilityState === 'unknown') return null;
+  return {
+    ...pageResult,
+    sizes,
+    availableSizes,
+    matchingSizes,
+    inStock: availabilityState === 'available',
+    statusLabel: statusLabelFor(sizes, matchingSizes, sizeFilters),
+    availabilityState,
+    source: 'nike-pdp-purchase-controls',
+  };
+}
+
+function pdpPurchaseSection(html) {
+  const selectorIndex = html.search(/\bid\s*=\s*["']size-selector["']/i);
+  if (selectorIndex === -1) return '';
+  const start = Math.max(0, html.lastIndexOf('<', selectorIndex));
+  const tail = html.slice(start, start + 50000);
+  const boundary = tail.search(/\bid\s*=\s*["']product-description-container["']|data-testid\s*=\s*["']product-description-container["']/i);
+  return boundary > 0 ? tail.slice(0, boundary) : tail;
+}
+
+function extractSizesFromHtmlControls(html) {
+  const section = pdpPurchaseSection(html);
+  if (!section) return [];
   const found = new Map();
   const buttonPattern = /<button\b([^>]*)>([\s\S]*?)<\/button>/gi;
 

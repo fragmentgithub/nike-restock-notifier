@@ -165,7 +165,7 @@ test('corrupt or missing chunks leave the complete current database untouched', 
   assert.equal(database.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE name LIKE 'backup_stage_%'").get().count, 0);
 });
 
-test('backup failures preserve the last successful pointer and active restores are refused', async (t) => {
+test('repeated publish failures remove incomplete generations and preserve the last successful pointer', async (t) => {
   const { database, storage } = databaseFor(t);
   const target = databaseFor(t);
   seed(database);
@@ -180,10 +180,73 @@ test('backup failures preserve the last successful pointer and active restores a
   } });
   const failingBackup = new MonitorBackup(storage, failingArchive, { now: () => timestamp });
   timestamp += 86400000;
-  await assert.rejects(failingBackup.createDaily(), /simulated target failure/);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    timestamp += 1;
+    await assert.rejects(failingBackup.createDaily(), /simulated target failure/);
+  }
   assert.equal((await backup.latest()).generation, first.generation);
+  assert.equal(target.database.prepare(`SELECT COUNT(*) AS count FROM backup_chunks
+    WHERE generation NOT IN (SELECT generation FROM backup_generations)`).get().count, 0);
   await assert.rejects(backup.restore(first.generation), /Pause the monitor/);
   assert.equal(document(database, 'state').marker, 'backup');
+});
+
+test('an interrupted table export deletes its already uploaded chunks', async (t) => {
+  const { database, storage } = databaseFor(t);
+  const target = databaseFor(t);
+  seed(database);
+  const archive = new BackupArchive(target.storage, { now: () => Date.parse('2026-09-05T12:00:00Z') });
+  let chunks = 0;
+  const interrupted = new Proxy(archive, { get(targetArchive, property) {
+    if (property === 'putChunk') return async (...args) => {
+      chunks += 1;
+      if (chunks === 2) throw new Error('simulated export interruption');
+      return targetArchive.putChunk(...args);
+    };
+    const value = targetArchive[property];
+    return typeof value === 'function' ? value.bind(targetArchive) : value;
+  } });
+  await assert.rejects(
+    new MonitorBackup(storage, interrupted).createDaily(),
+    /simulated export interruption/,
+  );
+  assert.equal(chunks, 2);
+  assert.equal(target.database.prepare('SELECT COUNT(*) AS count FROM backup_chunks').get().count, 0);
+  assert.equal(target.database.prepare('SELECT COUNT(*) AS count FROM backup_generations').get().count, 0);
+});
+
+test('cleanup failure cannot replace the original backup error', async (t) => {
+  const { database, storage } = databaseFor(t);
+  const target = databaseFor(t);
+  seed(database);
+  const archive = new BackupArchive(target.storage);
+  const original = new Error('original publish failure');
+  const brokenCleanup = new Proxy(archive, { get(targetArchive, property) {
+    if (property === 'publish') return async () => { throw original; };
+    if (property === 'delete') return async () => { throw new Error('cleanup failure'); };
+    const value = targetArchive[property];
+    return typeof value === 'function' ? value.bind(targetArchive) : value;
+  } });
+  let failure;
+  try { await new MonitorBackup(storage, brokenCleanup).createDaily(); }
+  catch (error) { failure = error; }
+  assert.equal(failure, original);
+});
+
+test('a successful backup never invokes incomplete-generation cleanup', async (t) => {
+  const { database, storage } = databaseFor(t);
+  const target = databaseFor(t);
+  seed(database);
+  const archive = new BackupArchive(target.storage);
+  let cleanups = 0;
+  const observed = new Proxy(archive, { get(targetArchive, property) {
+    if (property === 'delete') return async (...args) => { cleanups += 1; return targetArchive.delete(...args); };
+    const value = targetArchive[property];
+    return typeof value === 'function' ? value.bind(targetArchive) : value;
+  } });
+  const created = await new MonitorBackup(storage, observed).createDaily();
+  assert.equal(cleanups, 0);
+  assert.equal(archive.latest().generation, created.generation);
 });
 
 test('the backup Durable Object publishes and retains only the newest thirty generations', async (t) => {

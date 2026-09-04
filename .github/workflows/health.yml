@@ -38,6 +38,7 @@ jobs:
       - name: Check monitor freshness
         env:
           STATUS_URL: https://nike-restock-notifier.only-this-moment.workers.dev/healthz
+          STATUS_PAGE_URL: ${{ vars.STATUS_PAGE_URL || 'https://nike-restock-viewer.only-this-moment.workers.dev/' }}
           HEALTH_STALE_MINUTES: ${{ vars.HEALTH_STALE_MINUTES }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: node scripts/check-health.js

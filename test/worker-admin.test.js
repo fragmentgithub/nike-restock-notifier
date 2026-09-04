@@ -280,7 +280,8 @@ test('secret values and secret-shaped fields never appear in exports, public sta
 });
 
 test('pages, assets, status and health are unavailable without authorization', async (t) => {
-  const { bindings } = fixture(t);
+  const { controller, bindings } = fixture(t);
+  controller.backup = { latest: async () => ({ createdAt: new Date(NOW).toISOString() }) };
   const status = await handleWorkerRequest(request('/status.json', { token: '' }), bindings);
   assert.equal(status.status, 401);
   assert.equal(status.headers.get('cache-control'), 'no-store');

@@ -78,11 +78,12 @@ function render(state) {
   const availableCount = products.filter((item) =>
     item.settings?.enabled !== false && !item.pausedAt && hasConfirmedStock(item),
   ).length;
-  const monitorErrors = Array.isArray(state.errors)
-    ? state.errors
-    : state.lastError
-      ? [state.lastError]
-      : [];
+  const monitorErrors = [...new Set([
+    ...(Array.isArray(state.errors) ? state.errors : []),
+    state.lastError,
+    state.meta?.lastError,
+  ].filter((value) => typeof value === 'string' && value.trim()).map((value) => value.trim()))];
+  const monitorFailed = monitorErrors.length > 0;
   const stale = !paused && isStatusStale(state, config, products);
   const configuredLoopMinutes = Number(config.loopMinutes);
   const loopMinutesValue = Number.isFinite(configuredLoopMinutes) ? configuredLoopMinutes : 25;
@@ -110,8 +111,8 @@ function render(state) {
         ? `新商品自動追尾: 有効 / 最終探索 ${formatDate(discoveryAt)}`
         : '新商品自動追尾: 初回探索待ち';
 
-  setText(runStatus, paused ? '一時停止中' : stale ? '更新遅延' : shadow ? '検証中・通知OFF' : '自動監視中');
-  runStatus.className = `status-pill ${stale ? 'error' : paused ? '' : 'running'}`;
+  setText(runStatus, paused ? '一時停止中' : stale ? '更新遅延' : monitorFailed ? '監視エラー' : shadow ? '検証中・通知OFF' : '自動監視中');
+  runStatus.className = `status-pill ${stale || monitorFailed ? 'error' : paused ? '' : 'running'}`;
   const statusMessages = stale
     ? ['ステータスの更新が遅延しています。表示内容は最新でない可能性があります。', ...monitorErrors]
     : monitorErrors;

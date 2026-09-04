@@ -1,3 +1,5 @@
+export const DEFAULT_STATUS_PAGE_URL = 'https://nike-restock-viewer.only-this-moment.workers.dev/';
+
 export function evaluateWorkerHealth(status, { now = Date.now() } = {}) {
   const updatedAt = validIsoDate(status?.lastCompletedAt);
   const ageMinutes = updatedAt ? Math.max(0, Math.floor((now - Date.parse(updatedAt)) / 60000)) : null;
@@ -5,9 +7,34 @@ export function evaluateWorkerHealth(status, { now = Date.now() } = {}) {
   if (status?.mode !== 'active') reason = '本番監視が停止または検証モードになっています';
   else if (status.webhookConfigured !== true) reason = 'Discord通知先が設定されていません';
   else if (!updatedAt || Date.parse(updatedAt) > now + 300000) reason = '監視の完了時刻を確認できません';
-  else if (status.healthy !== true || !Number.isFinite(Date.parse(status.nextAlarmAt || '')) ||
+  else if (status.monitorHealthy === false || !Number.isFinite(Date.parse(status.nextAlarmAt || '')) ||
       Date.parse(status.nextAlarmAt) < now - 120000) reason = '監視処理または次回起動の予約に異常があります';
+  else if (status.backupHealthy !== true) reason = Number(status.backupFailureStreak) > 0
+    ? '監視データのバックアップに継続的な失敗があります'
+    : '監視データのバックアップが24時間以上成功していません';
+  else if (status.healthy !== true) reason = '監視処理に異常があります';
   return { healthy: !reason, reason, updatedAt, ageMinutes };
+}
+
+export function resolveStatusPageUrl(value) {
+  return privateHttpsRoot(value) || DEFAULT_STATUS_PAGE_URL;
+}
+
+export function createHealthNotificationPayload(result, pageUrl, { now = Date.now() } = {}) {
+  const recovered = result.healthy;
+  return {
+    allowed_mentions: { parse: [] },
+    embeds: [{
+      title: recovered ? 'Nike監視が復旧しました' : 'Nike監視に異常があります',
+      description: recovered ? '監視とバックアップが正常範囲へ戻りました。' : result.reason,
+      url: resolveStatusPageUrl(pageUrl),
+      color: recovered ? 0x26734d : 0xa43f3a,
+      fields: result.updatedAt
+        ? [{ name: '最終更新', value: `<t:${Math.floor(Date.parse(result.updatedAt) / 1000)}:R>` }]
+        : [],
+      timestamp: new Date(now).toISOString(),
+    }],
+  };
 }
 
 export function evaluateMonitorHealth(
@@ -84,4 +111,19 @@ export function evaluateStatusFetchFailure(
 function validIsoDate(value) {
   const timestamp = Date.parse(value || '');
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function privateHttpsRoot(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port || !url.hostname) return '';
+    url.pathname = '/';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
 }

@@ -4,7 +4,7 @@
 
 **ページは本人限定。Cloudflare上でPCがオフでも閲覧でき、長期リストックトレンドを確認する。** 過度な作り込みを避け、監視・通知ロジックの正確さと効率を優先する。一般公開画面・GitHub Pages・移転案内を復活させない。
 
-## 最新変更：本人限定ページ、長期分析、別DOバックアップ、確認頻度の安全策
+## 最新変更：在庫確認の正確化、検証済みトレンド、バックアップ監視
 
 閲覧URLは `https://nike-restock-viewer.only-this-moment.workers.dev`。Cloudflare Accessの本人メール限定ポリシーとメールOTPで認証する。本人の実メールアドレスをリポジトリに記載しない。PCを停止してもCloudflareの監視・保存・閲覧は継続する。
 
@@ -14,11 +14,13 @@
 
 長期保存は `src/worker-trend-storage.js` と `src/worker-storage.js`。入荷検出イベントを `monitor_restock_events` に同一商品+UTC時刻で重複排除して保存し、通常state/status保存と同じtransactionで差分追加する。短期ring・通知済みキーは維持する。checkpointはchunk対応の `trend-meta` 文書で、cold/warmとも変化なし保存時にarchive全体を読み込んだり再INSERTしたりしない。
 
+Nextの商品JSONにあるサイズの `ACTIVE` は販売可能を意味しないため、在庫候補があるときはNikeのサイズ別availability APIで対象styleColor・groupKey・SKUを照合する。API失敗、SKU対応の欠落、未知状態はfail-closedで通知しない。PDP購入UIへのfallbackは、画面のselectedProductと監視対象のstyleColorが一致するときだけ許可する。商品全体が明示的な発売前または売り切れなら追加APIを呼ばず、従来どおりPDPの明示状態を使う。
+
 保持は最大730日・100万件。期限削除は原則1日1回、集計の期間判定は毎回適用する。上限到達時は最古から整理し、注記する。`getTrends({styleColor:'all'|商品コード, days:'all'|7|30|90|365|730})` はSQLでJST24時間帯を集計する。商品候補は最大1000件だが全商品集計には省略商品も含む。
 
-最初の閲覧またはstate保存で、既存の全体最大300件・商品別最大60件の短期履歴を自動backfillする。最初がstate置換でも置換前の履歴を先に取り込む。保存開始前の全履歴が揃うわけではないため、返却の `period.archiveStartedAt` / `notes.retentionLabel` に実保存開始日と部分記録の注記を含める。保存期間や検出時刻は連続監視や実際の補充時刻を保証しない。
+最初の閲覧またはstate保存で、既存の全体最大300件・商品別最大60件の短期履歴を自動backfillする。最初がstate置換でも置換前の履歴を先に取り込む。保存開始前の全履歴が揃うわけではないため、返却の `period.archiveStartedAt` / `notes.retentionLabel` に実保存開始日と部分記録の注記を含める。`trend-meta.evidenceRevision=2` と `verifiedFrom` を境界にし、旧方式の行は削除せず保存したまま全表示集計から除外する。revision更新と同じcommitの正規化済み観測は、現在から60秒以内で未来でない場合だけ境界候補に使い、古いreplayで境界を後退させない。保存期間や検出時刻は連続監視や実際の補充時刻を保証しない。
 
-分析は `src/worker-trend-analytics.js`。分析導入後の信頼できる観測から `monitor_product_coverage` と `monitor_sellout_episodes` を作る。旧入荷イベントの監視時間や売り切れ区間はbackfillしない。import、paused、長い空白、取得不能はboundaryとして区間を切る。
+分析は `src/worker-trend-analytics.js`。検証開始後の信頼できる観測から `monitor_product_coverage` と `monitor_sellout_episodes` を作る。頻度の入荷件数は、信頼できる観測で開始したsellout episodeを元に数え、共有archiveの旧イベントや後からimportした履歴を混ぜない。旧入荷イベントの監視時間や売り切れ区間はbackfillしない。import、paused、長い空白、取得不能はboundaryとして区間を切る。
 
 `getTrends` の `analytics` は次を返す。
 
@@ -29,7 +31,7 @@
 
 商品filterは全分析、days filterは `weekdayHours` / `sellout` / `coverage` に適用する。`comparison` だけはdaysに依存せず、選択商品の最近30日と直前30日を比較する。
 
-バックアップは `src/worker-backup.js`。監視DOとは別のSQLite DO `NikeBackup` へ日次世代を作り、最新30世代だけを残す。許可対象は `state` / `status` / `control` / `trend-meta` 文書、sample block、長期イベント、coverage、sellout episode、分析cursor/meta/gap。migration credential、`ADMIN_TOKEN`、`DISCORD_WEBHOOK`、Access資格情報は対象外。
+バックアップは `src/worker-backup.js`。監視DOとは別のSQLite DO `NikeBackup` へ日次世代を作り、最新30世代だけを残す。許可対象は `state` / `status` / `control` / `trend-meta` 文書、sample block、長期イベント、coverage、sellout episode、分析cursor/meta/gap。migration credential、`ADMIN_TOKEN`、`DISCORD_WEBHOOK`、Access資格情報は対象外。exportまたはpublishに失敗した固有世代はその場で削除し、5分ごとの再試行で未完成chunkを蓄積しない。最新成功時刻・連続失敗・一般化したエラーをcontrolへ保存し、24時間を超えて成功世代がない場合を含めて `/healthz` を異常にする。
 
 復元は `NikeMonitor` がpausedの場合だけ許可する。manifest・schema・chunk件数・連鎖hashをすべて検証し、一時tableへ展開してからpausedを再確認し、単一transactionで置換する。検証失敗時は現行DBを変更せず、成功後もstatus/controlをpaused、`nextCheckAt` をnullに固定する。現在の資格情報は置換しない。復元後は状態、通知済みキー、短期履歴、長期集計を確認してからshadow/activeへ進める。
 
@@ -37,20 +39,21 @@
 
 確認頻度は通常の商品ごとに120秒、発売前対象が1〜2件なら30秒。発売前対象が同時に3件以上なら、その対象だけ60秒以上へ自動緩和する。発売日時が不明な `coming-soon` は初回観測時刻をstateへ保存し、4時間後に通常間隔へ戻す。旧stateは `lastSeenAt` を起点に移行し、後から発売日時を取得した場合は既存の発売180分前〜60分後の判定へ切り替える。
 
-289テスト成功。実Miniflare/WorkerdでAccessの本人/他人/未設定/偽装拒否、読み取り専用service binding、全6期間のSQL集計、getTrends前後の1万件サンプル・通知キー・短期履歴の一致、別DOへの検証付きバックアップと復元を確認した。本番秘密値は使わず、外部通信は遮断している。100万件の保持上限とtransaction rollbackもNode SQLiteで検証済み。
+314テスト成功。実Miniflare/WorkerdでAccessの本人/他人/未設定/偽装拒否、読み取り専用service binding、全6期間のSQL集計、検証済み境界、getTrends前後の1万件サンプル・通知キー・短期履歴の一致、別DOへの検証付きバックアップと復元を確認した。本番秘密値は使わず、外部通信は遮断している。100万件の保持上限とtransaction rollbackもNode SQLiteで検証済み。
 
 ### 最新デプロイの反映後確認
 
 | 項目 | 結果 |
 | --- | --- |
-| 監視Worker version | `e7decc7f-45c2-4869-932e-2526d890f196` |
-| 閲覧Worker version | `503286ff-70dd-42ff-b17d-8e59296ea3bd` |
-| 本人限定Access設定・本人以外の拒否 | 本人メールだけの許可ポリシーを維持。未認証の `/`・`/trend-view.js`・`/api/trends`・`/admin/state` はすべてAccessログインへ302。監視Workerの `/` は404、status/healthは401。 |
-| 本人ログイン後のページ・トレンド | 本人の実ログインは未確認。ローカル画面で全履歴14件、分析カード、曜日×時間帯168セル、データ不足表示を確認。 |
-| active/通知キー/履歴/長期集計の保持・自動監視 | healthy/activeを維持。8商品の通知キーと商品別履歴、全体履歴38件が反映前後で完全一致。長期archiveは入荷19件。現行4商品の反映後の自動取得成功、監視時間9.077商品時間・4区間を確認。成功率99.4%、平均376ms、連続失敗0。 |
-| 別DOバックアップ | 検証済み世代を3件作成。最新は8テーブル・46行で、分析coverageを含む。日次処理は同一UTC日には重複作成しない。 |
+| 監視Worker version | `21e2ce8e-346d-4e25-aefb-63b6852ccb35` |
+| 閲覧Worker version | `dd57198a-e742-4ad5-a195-8ad03af4e969` |
+| 本人限定Access設定・本人以外の拒否 | 本人メールだけの許可ポリシーを維持。未認証の閲覧Worker `/`・`/api/trends` はAccessログインへ302。監視Workerの `/` は404、`/status.json`・`/healthz` は401。 |
+| 本人ログイン後のページ・トレンド | 本人の実ログインは未確認。隔離したWorkerdでAccess認証と表示用データを確認。ページは検証開始時刻と除外件数を表示する。 |
+| active/通知キー/履歴/長期集計の保持・自動監視 | healthy/activeを維持。8商品の通知キーと商品別履歴は反映前後で完全一致。4商品active・4商品paused、1291確認中1284成功、成功率99.5%、平均305ms、連続失敗0。現行Mind 001は7サイズ売り切れ、エラー0を本番probeで確認。 |
+| 検証済みトレンド | archiveの旧19件は保持し、検証済み集計では0件から開始。`evidenceRevision=2`、`excludedUnverifiedEvents=19`、検証開始直後のcoverage 0.003商品時間を確認。 |
+| 別DOバックアップ | 検証済み世代を5件保持。最新は8テーブル・48行。更新前と更新後に手動作成し、healthで最新時刻・連続失敗0・エラーなしを確認。 |
 
-長期保存開始は `2026-09-04T17:32:38.089Z`（日本時間2026-09-05 02:32:38.089）、補正分析開始は `2026-09-04T18:23:42.890Z`。旧14件は補正分析へ混ぜず、以後の実観測だけを使う。監視Workerの未認証 `/status.json`・`/healthz` は401、`/` は404、閲覧Workerの未認証 `/`・`/api/trends` はAccessログインへ302を確認した。289テストと実Workerd検証も再実行して成功している。本人の認証済みブラウザー表示を確認するまでは、その項目だけ完了扱いにしない。
+長期保存開始は `2026-09-04T17:32:38.089Z`（日本時間2026-09-05 02:32:38.089）、現行判定の検証開始は `2026-09-04T22:44:59.097Z`（日本時間2026-09-05 07:44:59.097）。旧19件は削除せず、グラフ・頻度・売り切れ時間・期間比較へ混ぜない。監視Workerの未認証 `/status.json`・`/healthz` は401、`/` は404、閲覧Workerの未認証 `/`・`/api/trends` はAccessログインへ302を確認した。314テストと実Workerd検証も再実行して成功している。本人の認証済みブラウザー表示を確認するまでは、その項目だけ完了扱いにしない。
 
 ## 前回の品質改善とデプロイ（2026-09-05、履歴）
 

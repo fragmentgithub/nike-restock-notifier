@@ -79,8 +79,13 @@ function trendSummary(filters = { styleColor: 'all', days: 'all' }, {
     hours: Array.from({ length: 24 }, (_, hour) => ({ hour, count: hour === 4 ? count : 0 })),
     totalEvents: count, products,
     period: { days: filters.days === 'all' ? 'all' : Number(filters.days),
-      retainedFrom, retainedTo: retainedFrom, windowEnd: new Date(NOW).toISOString() },
-    notes: { retentionLabel: '履歴は最大2年（730日）保存します。開始前は残存履歴のみです。' },
+      retainedFrom, retainedTo: retainedFrom, windowEnd: new Date(NOW).toISOString(),
+      verifiedFrom: '2026-09-05T18:00:00Z', countedFrom: '2026-09-05T18:00:00Z',
+      excludedUnverifiedEvents: 2 },
+    notes: {
+      retentionLabel: '履歴は最大2年（730日）保存します。開始前は残存履歴のみです。',
+      verificationLabel: '2026-09-06 03:00（日本時間）以降の検証済み記録だけを集計し、それ以前の2件は保存したまま除外しています。',
+    },
     ...overrides,
   };
 }
@@ -165,6 +170,18 @@ test('a successfully fetched stale snapshot marks both status and trends, then c
   assert.equal(app.node('runStatus').textContent, '自動監視中');
   assert.doesNotMatch(app.node('trendMessage').textContent, /更新が遅延|前回取得/);
   assert.equal(app.node('trendPeriod').value, '7');
+});
+
+test('a controller failure in meta is shown immediately and duplicate messages count once', async (t) => {
+  const message = 'Monitoring step failed; a retry is scheduled.';
+  const app = await loadApp(t, state({
+    errors: [message],
+    meta: { mode: 'active', lastError: message },
+  }));
+  assert.equal(app.node('runStatus').textContent, '監視エラー');
+  assert.match(app.node('runStatus').className, /error/);
+  assert.equal(app.node('checkStatus').textContent, '1件エラー');
+  assert.equal(app.node('monitorErrorHint').textContent, message);
 });
 
 test('malformed refreshes preserve the complete prior snapshot instead of partially changing it', async (t) => {
@@ -266,6 +283,19 @@ test('long-term totals come only from the archive API and all supported periods 
     assert.equal(app.node('trendTotal').textContent, '42件');
   }
   assert.match(app.node('trendRetention').textContent, /最大2年/);
+  assert.match(app.node('trendMessage').textContent, /検証済み記録.*2件.*保存したまま除外/);
+});
+
+test('invalid verification counts cannot replace a previously validated trend', async (t) => {
+  const app = await loadApp(t, state());
+  app.setTrends((filters) => trendSummary(filters, {
+    period: { days: filters.days === 'all' ? 'all' : Number(filters.days),
+      retainedFrom: null, retainedTo: null, verifiedFrom: '2026-09-05T18:00:00Z',
+      countedFrom: '2026-09-05T18:00:00Z', excludedUnverifiedEvents: -1 },
+  }));
+  await app.refresh(state());
+  assert.equal(app.node('trendTotal').textContent, '1件');
+  assert.match(app.node('trendMessage').textContent, /前回取得した集計.*応答形式が不正/);
 });
 
 test('older filter responses and errors cannot replace the newest response even when abort is ignored', async (t) => {

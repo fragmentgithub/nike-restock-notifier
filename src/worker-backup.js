@@ -16,7 +16,7 @@ const decoder = new TextDecoder('utf-8', { fatal: true });
 export class MonitorBackup {
   constructor(storage, archive, { now = Date.now } = {}) {
     if (!storage?.sql || !storage?.transactionSync) throw new TypeError('SQLite storage is required.');
-    if (!archive?.putChunk || !archive?.publish) throw new TypeError('A backup Durable Object is required.');
+    if (!archive?.putChunk || !archive?.publish || !archive?.delete) throw new TypeError('A backup Durable Object is required.');
     this.storage = storage;
     this.sql = storage.sql;
     this.archive = archive;
@@ -27,20 +27,27 @@ export class MonitorBackup {
     const createdAt = new Date(this.now()).toISOString();
     const day = createdAt.slice(0, 10);
     const generation = `${day}/${createdAt.replace(/[-:.Z]/g, '')}-${crypto.randomUUID()}`;
-    const tables = [];
-    let totalRows = 0;
-    for (const table of TABLE_NAMES) {
-      const schema = tableSchema(this.sql, table);
-      if (!schema) continue;
-      const summary = await this.exportTable(generation, table, schema);
-      tables.push(summary);
-      totalRows += summary.rowCount;
+    try {
+      const tables = [];
+      let totalRows = 0;
+      for (const table of TABLE_NAMES) {
+        const schema = tableSchema(this.sql, table);
+        if (!schema) continue;
+        const summary = await this.exportTable(generation, table, schema);
+        tables.push(summary);
+        totalRows += summary.rowCount;
+      }
+      const contentHash = await sha256(JSON.stringify(tables));
+      const manifest = { version: 1, generation, createdAt, totalRows, contentHash, tables };
+      // The target publishes only after independently checking every stored chunk.
+      await this.archive.publish(encoder.encode(JSON.stringify(manifest)));
+      return { generation, createdAt, tables: tables.length, rows: totalRows };
+    } catch (error) {
+      // Every attempt uses a unique generation. Remove its partial chunks now so
+      // a persistent failure cannot accumulate a full upload every cron retry.
+      try { await this.archive.delete(generation); } catch {}
+      throw error;
     }
-    const contentHash = await sha256(JSON.stringify(tables));
-    const manifest = { version: 1, generation, createdAt, totalRows, contentHash, tables };
-    // The target publishes only after independently checking every stored chunk.
-    await this.archive.publish(encoder.encode(JSON.stringify(manifest)));
-    return { generation, createdAt, tables: tables.length, rows: totalRows };
   }
 
   async latest() {

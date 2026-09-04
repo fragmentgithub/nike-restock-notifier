@@ -7,6 +7,7 @@ import {
   sizeMatches,
 } from '../src/nike.js';
 import { applyCheckState, notificationDecision } from '../src/monitor-state.js';
+import { recordStockTransition } from '../src/monitor-policy.js';
 
 const PRODUCT_URL = 'https://www.nike.com/jp/t/nike-mind-001/HQ4307-005';
 const FRAGMENT_LAUNCH_URL = 'https://www.nike.com/jp/launch/t/mind-001-fragment-black';
@@ -106,16 +107,215 @@ test('発売日時が未来ならマーカーなしでサイズがACTIVEでも�
   assert.equal(result.sizes[0].available, false);
 });
 
-test('販売中の商品でACTIVEのサイズだけを在庫ありにする', async () => {
+test('NextのACTIVEは候補に留め、現行在庫APIの一部サイズだけを在庫ありにする', async () => {
   const result = await checkWithNextData({
     selectedProduct: product('HQ4307-005', {
       featuredAttributes: ['JUST_IN'],
       sizes: [size('27', 'ACTIVE'), size('28', 'OUT_OF_STOCK')],
     }),
-  });
+  }, [Response.json(availabilityPayload('HQ4307-005', [
+    availabilitySize('HQ4307-005', '27', true, 'HIGH'),
+    availabilitySize('HQ4307-005', '28', false, 'OOS'),
+  ]))]);
 
   assert.equal(result.inStock, true);
+  assert.equal(result.source, 'nike-product-availability-api');
+  assert.equal(
+    result.sourceUrl,
+    'https://api.nike.com/discover/product_details_availability/v1/marketplace/JP/language/ja/consumerChannelId/d9a5bc42-4b9c-4976-858a-f159cf99c647/groupKey/mind-group',
+  );
   assert.deepEqual(result.matchingSizes.map((item) => item.label), ['27']);
+});
+
+test('NextのACTIVEと未知SKUが混在しても在庫APIで対象カラーを確認する', async () => {
+  let calls = 0;
+  const result = await checkNikeStock(PRODUCT_URL, {
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return nextDataResponse({
+          selectedProduct: product('HQ4307-005', {
+            sizes: [size('27', 'ACTIVE'), size('28', 'RESERVED_FOR_LAUNCH')],
+          }),
+        });
+      }
+      return Response.json(availabilityPayload('HQ4307-005', [
+        availabilitySize('HQ4307-005', '27', true, 'HIGH'),
+        availabilitySize('HQ4307-005', '28', false, 'OOS'),
+      ]));
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.source, 'nike-product-availability-api');
+  assert.equal(result.availabilityState, 'available');
+  assert.deepEqual(result.availableSizes.map((item) => item.label), ['27']);
+});
+
+test('在庫APIにも未知SKUが残る場合は在庫ありにしない', async () => {
+  const result = await checkWithNextData({
+    selectedProduct: product('HQ4307-005', {
+      sizes: [size('27', 'ACTIVE'), size('28', 'RESERVED_FOR_LAUNCH')],
+    }),
+  }, [Response.json(availabilityPayload('HQ4307-005', [
+    availabilitySize('HQ4307-005', '27', true, 'HIGH'),
+    availabilitySize('HQ4307-005', '28', undefined, 'ACTIVE'),
+  ]))]);
+  const decision = notificationDecision({ lastStockKey: '' }, result);
+
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.inStock, false);
+  assert.deepEqual(result.availableSizes, []);
+  assert.equal(decision.shouldNotify, false);
+});
+
+test('実PDP形状の全サイズACTIVEを商品全体の明示OOSより優先しない', async () => {
+  let calls = 0;
+  const sevenSizes = ['6', '7', '8', '9', '10', '11', '12'].map((label) => size(label, 'ACTIVE'));
+  const result = await checkNikeStock(PRODUCT_URL, {
+    fetchImpl: async () => {
+      calls += 1;
+      return nextDataResponse({
+        selectedProduct: product('HQ4307-005', {
+          statusModifier: 'OUT_OF_STOCK_SEARCHABLE',
+          featuredAttributes: ['OUT_OF_STOCK', 'BEST_SELLER'],
+          sizes: sevenSizes,
+        }),
+      });
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(result.source, 'nike-next-data');
+  assert.equal(result.availabilityState, 'out-of-stock');
+  assert.equal(result.inStock, false);
+  assert.equal(result.availableSizes.length, 0);
+});
+
+test('現行在庫APIがtop-level groupKeyを省略しても商品IDで照合する', async () => {
+  const payload = availabilityPayload('HQ4307-005', [
+    availabilitySize('HQ4307-005', '27', true, 'HIGH'),
+  ]);
+  delete payload.groupKey;
+  const result = await checkWithNextData({
+    selectedProduct: product('HQ4307-005', { sizes: [size('27', 'ACTIVE')] }),
+  }, [Response.json(payload)]);
+
+  assert.equal(result.source, 'nike-product-availability-api');
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.availableSizes.map((item) => item.label), ['27']);
+});
+
+test('NextのACTIVE候補に対して在庫APIの商品サイズが空ならunknownにして遷移しない', async () => {
+  const result = await checkWithNextData({
+    selectedProduct: product('HQ4307-005', { sizes: [size('27', 'ACTIVE')] }),
+  }, [Response.json({ groupKey: 'mind-group', sizes: [] })]);
+  const entry = { styleColor: 'HQ4307-005', lastStockKey: '', lastObservedStockKey: '' };
+  const decision = notificationDecision(entry, result);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.inStock, false);
+  assert.equal(result.availableSizes.length, 0);
+  assert.equal(decision.shouldNotify, false);
+  assert.equal(recordStockTransition(entry, result), null);
+  assert.equal(entry.lastObservedStockKey, '');
+});
+
+test('NextのACTIVE候補を在庫APIで確認できなければunknownにする', async () => {
+  let calls = 0;
+  const responses = [
+    nextDataResponse({
+      selectedProduct: product('HQ4307-005', { sizes: [size('27', 'ACTIVE')] }),
+    }),
+    new Response('Unavailable', { status: 503 }),
+  ];
+  const result = await checkNikeStock(PRODUCT_URL, {
+    fetchImpl: async (url, options) => {
+      calls += 1;
+      if (calls === 2) {
+        assert.match(String(url), /product_details_availability\/v1\/marketplace\/JP\/language\/ja/);
+        assert.equal(options.headers['nike-api-caller-id'], 'com.nike.commerce.nikedotcom.web');
+      }
+      return responses.shift();
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.ok, false);
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.inStock, false);
+});
+
+test('selectedProductのgroupKey欠落時はslug末尾で現行在庫APIを照合する', async () => {
+  let requestedUrl = '';
+  const pageProps = {
+    slug: 'nike-mind-001-fallbackKey',
+    selectedProduct: product('HQ4307-005', {
+      groupKey: '',
+      sizes: [size('27', 'ACTIVE')],
+    }),
+  };
+  const responses = [
+    nextDataResponse(pageProps),
+    Response.json(availabilityPayload('HQ4307-005', [
+      availabilitySize('HQ4307-005', '27', true, 'HIGH'),
+    ], { groupKey: 'fallbackKey' })),
+  ];
+  const result = await checkNikeStock(PRODUCT_URL, {
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return responses.shift();
+    },
+  });
+
+  assert.match(requestedUrl, /\/groupKey\/fallbackKey$/);
+  assert.equal(result.source, 'nike-product-availability-api');
+  assert.equal(result.inStock, true);
+});
+
+test('在庫API失敗時もPDPの購入UIが明確ならUIのサイズを採用する', async () => {
+  const pageProps = {
+    selectedProduct: product('HQ4307-005', {
+      sizes: [size('27', 'ACTIVE'), size('28', 'ACTIVE')],
+    }),
+  };
+  const html = `${nextDataScript(pageProps)}
+    <div id="size-selector"><button>27</button><button disabled>28</button></div>
+    <button data-testid="add-to-cart">カートに追加</button>
+    <div id="product-description-container"></div>`;
+  const result = await checkWithResponses([
+    new Response(html),
+    new Response('Unavailable', { status: 503 }),
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.source, 'nike-pdp-purchase-controls');
+  assert.equal(result.availabilityState, 'available');
+  assert.deepEqual(result.availableSizes.map((item) => item.label), ['27']);
+});
+
+test('在庫API失敗時は表示中の別カラーの購入UIをURL指定カラーに採用しない', async () => {
+  const requested = product('HQ4307-005', { sizes: [size('27', 'ACTIVE')] });
+  const visible = product('HQ4307-003', { sizes: [size('27', 'ACTIVE')] });
+  const html = `${nextDataScript({
+    selectedProduct: visible,
+    productGroups: [{ products: { 'HQ4307-005': requested } }],
+  })}
+    <div id="size-selector"><button>27</button></div>
+    <button data-testid="add-to-cart">カートに追加</button>
+    <div id="product-description-container"></div>`;
+  const result = await checkWithResponses([
+    new Response(html),
+    new Response('Unavailable', { status: 503 }),
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.equal(result.source, 'nike-next-data');
+  assert.equal(result.product.styleColor, 'HQ4307-005');
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.inStock, false);
+  assert.deepEqual(result.availableSizes, []);
 });
 
 test('未知のサイズ状態を在庫ありにしない', async () => {
@@ -371,6 +571,19 @@ test('SNKRSの在庫情報欠落を売り切れと混同しない', async () => 
   }
 });
 
+test('SNKRSのavailable欠落時はACTIVEだけで在庫ありにせず通知しない', async () => {
+  const result = await checkWithSnkrsData({
+    isActive: true,
+    skus: [snkrsSize('27', undefined, 'ACTIVE')],
+  });
+  const decision = notificationDecision({ lastStockKey: '' }, result);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.availabilityState, 'unknown');
+  assert.equal(result.inStock, false);
+  assert.equal(decision.shouldNotify, false);
+});
+
 test('SNKRSの明示的なavailable falseは残ったHIGH表示より優先する', async () => {
   const result = await checkWithSnkrsData({ isActive: true, skus: [snkrsSize('27', false, 'HIGH')] });
   assert.equal(result.inStock, false);
@@ -443,12 +656,17 @@ test('APIでも商品全体の在庫なし表示をSKUの残存在庫より優�
   assert.equal(result.availabilityState, 'out-of-stock');
 });
 
-async function checkWithNextData(pageProps) {
+async function checkWithNextData(pageProps, followupResponses = []) {
+  return checkWithResponses([nextDataResponse(pageProps), ...followupResponses]);
+}
+
+function nextDataScript(pageProps) {
   const payload = { props: { pageProps } };
-  const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script>`;
-  return checkNikeStock(PRODUCT_URL, {
-    fetchImpl: async () => new Response(html),
-  });
+  return `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(payload)}</script>`;
+}
+
+function nextDataResponse(pageProps) {
+  return new Response(nextDataScript(pageProps));
 }
 
 async function checkWithResponses(responses) {
@@ -508,6 +726,8 @@ async function checkWithSnkrsData(overrides = {}) {
 function product(styleColor, overrides = {}) {
   return {
     styleColor,
+    groupKey: overrides.groupKey ?? 'mind-group',
+    globalProductId: overrides.globalProductId ?? `global-${styleColor}`,
     productInfo: {
       fullTitle: overrides.title || `Nike Mind 001 ${styleColor}`,
       url: `/jp/t/nike-mind-001/${styleColor}`,
@@ -516,6 +736,23 @@ function product(styleColor, overrides = {}) {
     featuredAttributes: overrides.featuredAttributes || [],
     launchDate: overrides.launchDate,
     sizes: overrides.sizes || [],
+  };
+}
+
+function availabilityPayload(styleColor, sizes, overrides = {}) {
+  return {
+    groupKey: overrides.groupKey ?? 'mind-group',
+    sizes,
+  };
+}
+
+function availabilitySize(styleColor, label, isAvailable, ship) {
+  return {
+    globalProductId: `global-${styleColor}`,
+    merchSkuId: `sku-${label}`,
+    localizedLabel: label,
+    label,
+    availability: { isAvailable, ship },
   };
 }
 

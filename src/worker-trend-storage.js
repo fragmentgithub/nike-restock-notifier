@@ -5,6 +5,11 @@ const CAPACITY = 1000000;
 const PRODUCT_LIMIT = 1000;
 const STYLE_PATTERN = /^[A-Z0-9]{5,8}-[A-Z0-9]{3}$/;
 const PERIODS = new Set([7, 30, 90, 365, 730]);
+const VERIFIED_OBSERVATION_MAX_LAG_MS = 60000;
+// Revision 1 was the original parser evidence. Revision 2 starts after the
+// inventory semantics were tightened; older rows stay archived but are not
+// evidence for user-facing trends.
+const EVIDENCE_REVISION = 2;
 
 /** Compact event archive: it stores detection identities, never notification data. */
 export class RestockArchive {
@@ -19,7 +24,7 @@ export class RestockArchive {
       ON monitor_restock_events (detected_at, style_color)`);
   }
 
-  prepare(state, metadata, legacyState = null) {
+  prepare(state, metadata, legacyState = null, verifiedObservationAt = null) {
     const now = this.now();
     const current = collectEvents(state, now);
     const previousKeys = new Set(metadata?.recentKeys || []);
@@ -27,6 +32,7 @@ export class RestockArchive {
     // Backfill the old document even when the first new operation replaces it.
     if (!metadata) for (const [key, event] of collectEvents(legacyState, now).events) candidates.set(key, event);
     for (const [key, event] of current.events) if (!previousKeys.has(key)) candidates.set(key, event);
+    const evidence = evidenceMetadata(metadata, candidates, now, verifiedObservationAt);
     return {
       now, candidates,
       metadata: {
@@ -37,8 +43,17 @@ export class RestockArchive {
         recentKeys: [...current.events.keys()].sort(),
         products: [...current.products].sort().slice(0, PRODUCT_LIMIT),
         productsTruncated: current.products.size > PRODUCT_LIMIT,
+        evidenceRevision: evidence.revision,
+        verifiedFrom: evidence.verifiedFrom,
       },
     };
+  }
+
+  needsMetadataUpgrade(metadata) {
+    if (!metadata) return true;
+    const revision = Number(metadata.evidenceRevision);
+    return !Number.isSafeInteger(revision) || revision < EVIDENCE_REVISION ||
+      !validVerifiedTimestamp(metadata.verifiedFrom, this.now());
   }
 
   // Called inside the transaction that saves state/status; publish metadata only
@@ -75,25 +90,30 @@ export class RestockArchive {
     const now = this.now();
     const cutoff = now - RETENTION_DAYS * DAY_MS;
     const windowStart = selectedDays === 'all' ? cutoff : now - selectedDays * DAY_MS;
+    const verifiedFrom = verifiedTimestamp(metadata, now);
+    const effectiveStart = Math.max(windowStart, verifiedFrom);
     const selected = style === 'ALL' ? '' : ' AND style_color = ?';
-    const args = [windowStart, cutoff, now, ...(style === 'ALL' ? [] : [style])];
+    const args = [effectiveStart, windowStart, verifiedFrom, cutoff, now, ...(style === 'ALL' ? [] : [style])];
     // One indexed scan, one bounded result row. SQL computes all 24 bins without
     // materializing event history in the Worker or sending it to the browser.
     const bins = Array.from({ length: 24 }, (_, hour) =>
-      `SUM(CASE WHEN detected_at >= window.start AND (CAST(detected_at / 3600000 AS INTEGER) + 9) % 24 = ${hour} THEN 1 ELSE 0 END) AS hour_${hour}`);
-    const result = this.sql.exec(`WITH window(start) AS (VALUES (?)) SELECT
+      `SUM(CASE WHEN detected_at >= bounds.effective_start AND (CAST(detected_at / 3600000 AS INTEGER) + 9) % 24 = ${hour} THEN 1 ELSE 0 END) AS hour_${hour}`);
+    const result = this.sql.exec(`WITH bounds(effective_start, selected_start, verified_from) AS (VALUES (?, ?, ?)) SELECT
       COUNT(*) AS retained_count, MIN(detected_at) AS retained_from, MAX(detected_at) AS retained_to,
-      SUM(CASE WHEN detected_at >= window.start THEN 1 ELSE 0 END) AS total,
-      COUNT(DISTINCT CASE WHEN detected_at >= window.start THEN style_color END) AS distinct_products,
-      MIN(CASE WHEN detected_at >= window.start THEN detected_at END) AS first_event,
-      MAX(CASE WHEN detected_at >= window.start THEN detected_at END) AS last_event,
+      SUM(CASE WHEN detected_at >= bounds.effective_start THEN 1 ELSE 0 END) AS total,
+      SUM(CASE WHEN detected_at >= bounds.selected_start AND detected_at < bounds.verified_from THEN 1 ELSE 0 END) AS excluded_unverified,
+      COUNT(DISTINCT CASE WHEN detected_at >= bounds.effective_start THEN style_color END) AS distinct_products,
+      MIN(CASE WHEN detected_at >= bounds.effective_start THEN detected_at END) AS first_event,
+      MAX(CASE WHEN detected_at >= bounds.effective_start THEN detected_at END) AS last_event,
       ${bins.join(', ')}
-      FROM monitor_restock_events, window WHERE detected_at >= ? AND detected_at <= ?${selected}`, ...args).toArray()[0];
+      FROM monitor_restock_events, bounds WHERE detected_at >= ? AND detected_at <= ?${selected}`, ...args).toArray()[0];
     const archivedProducts = this.sql.exec(`SELECT DISTINCT style_color FROM monitor_restock_events
       WHERE detected_at >= ? AND detected_at <= ? ORDER BY style_color LIMIT ?`, cutoff, now, PRODUCT_LIMIT + 1).toArray();
     const products = [...new Set([...metadata.products, ...archivedProducts.map((row) => row.style_color)])].sort();
     const started = metadata.archiveStartedAt;
     const startLabel = new Date(Date.parse(started) + JST_OFFSET_MS).toISOString().slice(0, 10);
+    const verificationLabel = formatJstMinute(verifiedFrom);
+    const excludedUnverifiedEvents = result.excluded_unverified || 0;
     return {
       timezone: 'Asia/Tokyo', styleColor: style === 'ALL' ? 'all' : style,
       hours: Array.from({ length: 24 }, (_, hour) => ({ hour, count: result[`hour_${hour}`] || 0 })),
@@ -104,17 +124,21 @@ export class RestockArchive {
         retainedFrom: iso(result.retained_from), retainedTo: iso(result.retained_to),
         retainedTransitionCount: result.retained_count,
         firstEventAt: iso(result.first_event), lastEventAt: iso(result.last_event),
-        archiveStartedAt: started,
+        archiveStartedAt: started, verifiedFrom: iso(verifiedFrom), countedFrom: iso(effectiveStart),
+        evidenceRevision: metadata.evidenceRevision, excludedUnverifiedEvents,
       },
       notes: {
         timestampBasis: 'detected', retentionLimited: true, retentionDays: RETENTION_DAYS,
         archiveStartedAt: started, legacyHistoryPartial: true,
         capacityLimit: CAPACITY, capacityLimited: metadata.capacityLimited,
         productsTruncated: metadata.productsTruncated || products.length > PRODUCT_LIMIT,
+        evidenceRevision: metadata.evidenceRevision, verifiedFrom: iso(verifiedFrom),
         sourceLimits: { legacyGlobalHistory: 300, legacyPerProductHistory: 60 },
         timestampLabel: '監視が入荷を検出した時刻を日本時間で集計しています。実際の補充時刻とはずれることがあります。',
         retentionLabel: `${startLabel}（日本時間）から長期保存しています。最大730日分を保持し、保存開始前は短期履歴から引き継げた一部の記録のみです。監視の中断中の入荷は含まれません。${metadata.capacityLimited ? '保存件数の上限に達したため、古い記録の一部を削除しています。' : ''}`,
         countingLabel: 'サイズ数にかかわらず、同一商品・同一時刻の入荷検出を1件とします。',
+        verificationLabel: `${verificationLabel}（日本時間）以降に新しい判定方法で確認した記録だけを件数・グラフ・分析に使用しています。` +
+          `選択した期間内のそれ以前の${excludedUnverifiedEvents.toLocaleString('ja-JP')}件は保存したまま集計から除外しています。`,
       },
     };
   }
@@ -160,6 +184,39 @@ function parseTimestamp(value) {
   if (month < 1 || month > 12 || day < 1 || day > monthDays[month - 1] || hour > 23 || minute > 59 || second > 59 ||
     (zone !== 'Z' && (Number(zone.slice(1, 3)) > 23 || Number(zone.slice(4, 6)) > 59))) return NaN;
   return Date.parse(value);
+}
+
+function evidenceMetadata(metadata, candidates, now, verifiedObservationAt) {
+  const revision = Number(metadata?.evidenceRevision);
+  if (metadata && Number.isSafeInteger(revision) && revision >= EVIDENCE_REVISION &&
+      validVerifiedTimestamp(metadata.verifiedFrom, now)) {
+    return { revision, verifiedFrom: new Date(metadata.verifiedFrom).toISOString() };
+  }
+  // A fresh archive can trust the history it is created from. Existing archive
+  // metadata is an upgrade, so its old rows stay retained behind a boundary set
+  // exactly once on the first write by this evidence revision.
+  const observationAt = Number(verifiedObservationAt);
+  // A state commit can carry the first observation made by the new parser a few
+  // milliseconds before its transaction. Use only that recent, normalized
+  // observation; an old replay must never move the evidence boundary backwards.
+  const safeObservationAt = Number.isFinite(observationAt) && observationAt <= now &&
+    observationAt >= now - VERIFIED_OBSERVATION_MAX_LAG_MS ? observationAt : now;
+  const firstCandidate = metadata ? safeObservationAt
+    : Math.min(now, ...[...candidates.values()].map((event) => event.timestamp));
+  return { revision: EVIDENCE_REVISION, verifiedFrom: new Date(firstCandidate).toISOString() };
+}
+
+function verifiedTimestamp(metadata, now) {
+  return validVerifiedTimestamp(metadata?.verifiedFrom, now) ? Date.parse(metadata.verifiedFrom) : now;
+}
+
+function validVerifiedTimestamp(value, now) {
+  const timestamp = typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) && timestamp <= now;
+}
+
+function formatJstMinute(timestamp) {
+  return new Date(timestamp + JST_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ');
 }
 
 function iso(value) { return value === null ? null : new Date(value).toISOString(); }

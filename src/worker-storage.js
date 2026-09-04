@@ -61,11 +61,14 @@ export class MonitorStorage {
   getTrends(options = {}) {
     const metadata = this.archiveMetadata();
     const day = Math.floor((this.trends.now() + 9 * 3600000) / 86400000);
-    if (!metadata || metadata.lastPrunedDay !== day || !this.analytics.exists()) {
+    if (!metadata || this.trends.needsMetadataUpgrade(metadata) ||
+        metadata.lastPrunedDay !== day || !this.analytics.exists()) {
       this.write({}, { initializeTrends: true, initializeAnalytics: true });
     }
     const summary = this.trends.summarize(this.trendMetadata, options);
-    summary.analytics = this.analytics.summarize(options);
+    summary.analytics = this.analytics.summarize(options, {
+      verifiedFrom: Date.parse(summary.period.verifiedFrom),
+    });
     return summary;
   }
 
@@ -123,12 +126,13 @@ export class MonitorStorage {
     const nextDocuments = new Map();
     const hasState = Object.hasOwn(documents, 'state');
     const metadata = hasState || initializeTrends ? this.archiveMetadata() : null;
+    const analyticsPlan = hasState || initializeAnalytics || observation || analyticsBoundary
+      ? this.analytics.prepare({ observation, boundary: analyticsBoundary }) : null;
     const archivePlan = hasState || initializeTrends ? this.trends.prepare(
       hasState ? documents.state : this.readDocument('state', {}),
       metadata, metadata ? null : this.readDocument('state', {}),
+      analyticsPlan?.observation?.at,
     ) : null;
-    const analyticsPlan = hasState || initializeAnalytics || observation || analyticsBoundary
-      ? this.analytics.prepare({ observation, boundary: analyticsBoundary }) : null;
     let nextMetadata;
     this.storage.transactionSync(() => {
       if (analyticsPlan) this.analytics.apply(analyticsPlan);

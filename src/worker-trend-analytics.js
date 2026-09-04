@@ -202,28 +202,35 @@ export class TrendAnalytics {
 
   exists() { return Boolean(this.sql.exec('SELECT id FROM monitor_analysis_meta WHERE id = 1').toArray()[0]); }
 
-  summarize({ styleColor = 'all', days = 'all' } = {}) {
+  summarize({ styleColor = 'all', days = 'all' } = {}, internal = {}) {
     const now = this.now();
-    const style = styleColor === 'all' ? 'all' : String(styleColor).toUpperCase();
+    const normalizedStyle = String(styleColor || 'all').trim().toUpperCase();
+    const style = normalizedStyle === 'ALL' ? 'all' : normalizedStyle;
     const daysNumber = days === 'all' ? 730 : Number(days);
     const start = now - daysNumber * DAY_MS;
     const meta = this.metadata();
-    const analysisStart = Math.max(start, meta.started_at);
+    const verifiedFrom = Number.isFinite(internal.verifiedFrom) && internal.verifiedFrom <= now
+      ? internal.verifiedFrom : meta.started_at;
+    const recordingStartedAt = Math.max(meta.started_at, verifiedFrom);
+    const analysisStart = Math.max(start, recordingStartedAt);
     const selection = style === 'all' ? '' : ' AND style_color = ?';
-    const bindings = style === 'all' ? [start, now] : [start, now, style];
+    const bindings = style === 'all' ? [analysisStart, now] : [analysisStart, now, style];
     const segments = this.sql.exec(`SELECT style_color, start_at, end_at FROM monitor_product_coverage
       WHERE end_at >= ? AND start_at <= ?${selection} ORDER BY start_at LIMIT 200001`, ...bindings).toArray();
     const segmentsTruncated = segments.length > 200000;
-    const cells = segmentsTruncated ? coverageCells([], start, now) : coverageCells(segments, start, now);
+    const cells = segmentsTruncated ? coverageCells([], analysisStart, now) : coverageCells(segments, analysisStart, now);
     const eventBindings = style === 'all' ? [analysisStart, now] : [analysisStart, now, style];
+    // Episode starts are created only by a reliable monitor observation with
+    // restockDetected=true. The general archive also contains imported legacy
+    // history, which must remain visible without becoming an analytics numerator.
     const eventCells = this.sql.exec(`SELECT
-      CAST(strftime('%w', detected_at / 1000, 'unixepoch', '+9 hours') AS INTEGER) AS weekday,
-      CAST(strftime('%H', detected_at / 1000, 'unixepoch', '+9 hours') AS INTEGER) AS hour,
-      COUNT(*) AS count FROM monitor_restock_events WHERE detected_at >= ? AND detected_at <= ?${selection}
+      CAST(strftime('%w', started_at / 1000, 'unixepoch', '+9 hours') AS INTEGER) AS weekday,
+      CAST(strftime('%H', started_at / 1000, 'unixepoch', '+9 hours') AS INTEGER) AS hour,
+      COUNT(*) AS count FROM monitor_sellout_episodes WHERE started_at >= ? AND started_at <= ?${selection}
       GROUP BY weekday, hour`, ...eventBindings).toArray();
     for (const event of eventCells) cells[event.weekday * 24 + event.hour].restockEvents = event.count;
     const observedMs = cells.reduce((total, cell) => total + cell.observedMs, 0);
-    const gapBindings = style === 'all' ? [start, now] : [start, now, style];
+    const gapBindings = style === 'all' ? [analysisStart, now] : [analysisStart, now, style];
     const excludedGaps = this.sql.exec(`SELECT COUNT(*) AS count FROM monitor_analysis_gaps
       WHERE occurred_at >= ? AND occurred_at <= ?${selection}`, ...gapBindings).toArray()[0].count;
     const weekdayHours = { cells: cells.map(({ weekday, hour, restockEvents: events, observedMs: ms }) => ({
@@ -231,10 +238,10 @@ export class TrendAnalytics {
       observedProductHours: ms > 0 ? round(ms / HOUR_MS, 3) : null,
       ratePer100ProductHours: ms > 0 ? round(events * 100 * HOUR_MS / ms, 3) : null,
     })) };
-    const comparison = this.comparison(style, now, meta.started_at);
+    const comparison = this.comparison(style, now, recordingStartedAt);
     return {
       coverage: {
-        recordingStartedAt: new Date(meta.started_at).toISOString(),
+        recordingStartedAt: new Date(recordingStartedAt).toISOString(),
         observedProductHours: observedMs > 0 ? round(observedMs / HOUR_MS, 3) : null,
         reliableSegments: Math.min(segments.length, 200000),
         excludedGaps,
@@ -244,7 +251,7 @@ export class TrendAnalytics {
           : '成功し在庫を判定できた連続観測の間だけを商品監視時間として数えます。過去の時間は補完しません。',
       },
       weekdayHours,
-      sellout: this.sellout(style, start, now),
+      sellout: this.sellout(style, analysisStart, now, verifiedFrom),
       comparison,
     };
   }
@@ -253,7 +260,8 @@ export class TrendAnalytics {
     const previousStart = now - 60 * DAY_MS;
     const currentStart = now - 30 * DAY_MS;
     const selected = style === 'all' ? '' : ' AND style_color = ?';
-    const bindings = style === 'all' ? [previousStart, now] : [previousStart, now, style];
+    const comparisonStart = Math.max(previousStart, recordingStartedAt);
+    const bindings = style === 'all' ? [comparisonStart, now] : [comparisonStart, now, style];
     const segments = this.sql.exec(`SELECT start_at, end_at FROM monitor_product_coverage
       WHERE end_at >= ? AND start_at <= ?${selected} LIMIT 200001`, ...bindings).toArray();
     const previousEventStart = Math.max(previousStart, recordingStartedAt);
@@ -262,15 +270,15 @@ export class TrendAnalytics {
       ? [previousEventStart, currentStart, currentEventStart, now, previousEventStart, now]
       : [previousEventStart, currentStart, currentEventStart, now, previousEventStart, now, style];
     const counts = this.sql.exec(`SELECT
-      SUM(CASE WHEN detected_at >= ? AND detected_at < ? THEN 1 ELSE 0 END) AS previous_events,
-      SUM(CASE WHEN detected_at >= ? AND detected_at <= ? THEN 1 ELSE 0 END) AS current_events
-      FROM monitor_restock_events WHERE detected_at >= ? AND detected_at <= ?${selected}`,
+       SUM(CASE WHEN started_at >= ? AND started_at < ? THEN 1 ELSE 0 END) AS previous_events,
+       SUM(CASE WHEN started_at >= ? AND started_at <= ? THEN 1 ELSE 0 END) AS current_events
+       FROM monitor_sellout_episodes WHERE started_at >= ? AND started_at <= ?${selected}`,
     ...eventBindings).toArray()[0];
     const periods = segments.length > 200000 ? [
       emptyPeriod(counts.previous_events || 0), emptyPeriod(counts.current_events || 0),
     ] : [
-      periodMetric(previousStart, currentStart, segments, counts.previous_events || 0),
-      periodMetric(currentStart, now, segments, counts.current_events || 0),
+      periodMetric(Math.max(previousStart, recordingStartedAt), currentStart, segments, counts.previous_events || 0),
+      periodMetric(Math.max(currentStart, recordingStartedAt), now, segments, counts.current_events || 0),
     ];
     const [previous, current] = periods;
     const sufficient = periods.every((period) => period.observedProductHours >= MIN_COMPARISON_HOURS &&
@@ -295,12 +303,12 @@ export class TrendAnalytics {
     };
   }
 
-  sellout(style, start, now) {
+  sellout(style, start, now, verifiedFrom) {
     const selected = style === 'all' ? '' : ' AND style_color = ?';
-    const bindings = style === 'all' ? [start, now, MAX_SELL_OUT_ROWS + 1]
-      : [start, now, style, MAX_SELL_OUT_ROWS + 1];
+    const bindings = style === 'all' ? [start, now, verifiedFrom, MAX_SELL_OUT_ROWS + 1]
+      : [start, now, verifiedFrom, style, MAX_SELL_OUT_ROWS + 1];
     const rows = this.sql.exec(`SELECT ended_at, min_duration_ms, max_duration_ms, censored
-      FROM monitor_sellout_episodes WHERE started_at >= ? AND started_at <= ?${selected}
+      FROM monitor_sellout_episodes WHERE started_at >= ? AND started_at <= ? AND restock_lower_at >= ?${selected}
       ORDER BY started_at LIMIT ?`, ...bindings).toArray();
     const completed = rows.filter((row) => !row.censored && row.ended_at !== null &&
       Number.isFinite(row.min_duration_ms) && Number.isFinite(row.max_duration_ms));

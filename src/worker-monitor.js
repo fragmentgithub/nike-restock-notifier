@@ -7,6 +7,9 @@ import { probeNike } from './worker-probe.js';
 import { MonitorBackup } from './worker-backup.js';
 
 const RECOVERY_DELAY_MS = 120000;
+const BACKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const BACKUP_FUTURE_TOLERANCE_MS = 5 * 60 * 1000;
+const BACKUP_FAILURE_MESSAGE = 'Daily backup failed; automatic retry is scheduled.';
 const BACKUP_GENERATION_PATTERN = /^\d{4}-\d{2}-\d{2}\/\d{8}T\d{9}-[0-9a-f-]{36}$/i;
 
 /** One personal monitor fleet; static page requests never enter this object. */
@@ -78,14 +81,38 @@ export class MonitorController {
     const alarm = await this.ctx.storage.getAlarm();
     const now = this.now();
     const schedulingHealthy = this.running || (Number.isFinite(alarm) && alarm >= now - RECOVERY_DELAY_MS);
+    const monitorHealthy = control.mode === 'paused' || (schedulingHealthy && !control.lastError);
+    let lastBackupAt = validBackupDate(control.lastBackupAt);
+    let backupFailureStreak = failureStreak(control.backupFailureStreak);
+    let lastBackupError = typeof control.lastBackupError === 'string' ? control.lastBackupError : null;
+
+    // Existing deployments have no backup fields until their first scheduled run.
+    // Read the latest private generation during that rolling-upgrade window.
+    if (!lastBackupAt && backupFailureStreak === 0 && this.backup) {
+      try {
+        lastBackupAt = validBackupDate((await this.backup.latest())?.createdAt);
+      } catch {
+        backupFailureStreak = 1;
+        lastBackupError = BACKUP_FAILURE_MESSAGE;
+      }
+    }
+    const backupTimestamp = Date.parse(lastBackupAt || '');
+    const backupHealthy = Boolean(this.backup) && backupFailureStreak === 0 &&
+      Number.isFinite(backupTimestamp) && backupTimestamp <= now + BACKUP_FUTURE_TOLERANCE_MS &&
+      now - backupTimestamp <= BACKUP_MAX_AGE_MS;
     return {
-      healthy: control.mode === 'paused' || (schedulingHealthy && !control.lastError),
+      healthy: monitorHealthy && backupHealthy,
+      monitorHealthy,
+      backupHealthy,
       mode: control.mode, running: this.running,
       webhookConfigured: Boolean(normalizeDiscordWebhook(this.env.DISCORD_WEBHOOK)),
       lastStartedAt: control.lastStartedAt || null,
       lastCompletedAt: control.lastCompletedAt || null,
       nextAlarmAt: alarm ? new Date(alarm).toISOString() : null,
       lastError: control.lastError || null,
+      lastBackupAt,
+      backupFailureStreak,
+      lastBackupError,
     };
   }
 
@@ -262,20 +289,63 @@ export class MonitorController {
   }
 
   async ensureBackedUp() {
-    if (!this.backup) return { ok: false, disabled: true };
     return this.exclusive(async () => {
-      const latest = await this.backup.latest();
-      const today = new Date(this.now()).toISOString().slice(0, 10);
-      if (latest?.createdAt?.slice(0, 10) === today) {
-        return { ok: true, created: false, latest };
+      try {
+        if (!this.backup) throw new Error(BACKUP_FAILURE_MESSAGE);
+        const latest = await this.backup.latest();
+        const today = new Date(this.now()).toISOString().slice(0, 10);
+        if (latest?.createdAt?.slice(0, 10) === today) {
+          await this.recordBackupSuccess(latest);
+          return { ok: true, created: false, latest };
+        }
+        const created = await this.backup.createDaily();
+        await this.recordBackupSuccess(created);
+        return { ok: true, created: true, latest: created };
+      } catch {
+        await this.recordBackupFailure();
+        throw new Error(BACKUP_FAILURE_MESSAGE);
       }
-      return { ok: true, created: true, latest: await this.backup.createDaily() };
     });
   }
 
   async backupNow() {
     if (!this.backup) return failure(503, 'Backup storage is not configured.');
-    return this.exclusive(async () => ({ ok: true, ...(await this.backup.createDaily()) }));
+    return this.exclusive(async () => {
+      try {
+        const created = await this.backup.createDaily();
+        await this.recordBackupSuccess(created);
+        return { ok: true, ...created };
+      } catch {
+        await this.recordBackupFailure();
+        throw new Error(BACKUP_FAILURE_MESSAGE);
+      }
+    });
+  }
+
+  async recordBackupSuccess(result) {
+    const lastBackupAt = validBackupDate(result?.createdAt);
+    if (!lastBackupAt) throw new Error(BACKUP_FAILURE_MESSAGE);
+    const control = this.control();
+    if (control.lastBackupAt === lastBackupAt && failureStreak(control.backupFailureStreak) === 0 &&
+        !control.lastBackupError) return;
+    await this.documents.commit({
+      control: { ...control, lastBackupAt, backupFailureStreak: 0, lastBackupError: null },
+    });
+  }
+
+  async recordBackupFailure() {
+    const control = this.control();
+    try {
+      await this.documents.commit({
+        control: {
+          ...control,
+          backupFailureStreak: Math.min(failureStreak(control.backupFailureStreak) + 1, 1000000),
+          lastBackupError: BACKUP_FAILURE_MESSAGE,
+        },
+      });
+    } catch {
+      // The original failure remains generic even if Durable Object storage is unavailable.
+    }
   }
 
   async listBackups() {
@@ -313,6 +383,14 @@ export class MonitorController {
 }
 
 function failure(status, error) { return { ok: false, status, error }; }
+function validBackupDate(value) {
+  const timestamp = Date.parse(value || '');
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+function failureStreak(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : 0;
+}
 function compareRuns(left, right) {
   const runDifference = BigInt(left.runId) - BigInt(right.runId);
   const difference = runDifference || BigInt(left.runAttempt) - BigInt(right.runAttempt);

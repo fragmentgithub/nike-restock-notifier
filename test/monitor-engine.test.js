@@ -37,9 +37,14 @@ function productPage(styleColor = TARGET, labels = ['27'], overrides = {}) {
       label, status: 'ACTIVE' })),
     ...overrides,
   };
+  const controls = (selectedProduct.sizes || []).map((size) =>
+    `<button${size.status === 'ACTIVE' ? '' : ' disabled'}>${size.localizedLabel || size.label}</button>`).join('');
+  const purchaseUi = controls && selectedProduct.sizes.some((size) => size.status === 'ACTIVE')
+    ? `<div id="size-selector">${controls}</div><button data-testid="add-to-cart">カートに追加</button>`
+    : `<div id="size-selector">${controls}</div><div data-testid="sold-out-container">在庫なし</div>`;
   return new Response(`<script id="__NEXT_DATA__">${JSON.stringify({
     props: { pageProps: { selectedProduct } },
-  })}</script>`);
+  })}</script>${purchaseUi}<div id="product-description-container"></div>`);
 }
 
 test('one alarm checks only one due product and does not mutate the supplied cache', async () => {
@@ -160,6 +165,43 @@ test('failed observation persistence prevents any Discord send', async () => {
   });
   await assert.rejects(engine.tick(), /保存に失敗/);
   assert.equal(posts, 0);
+});
+
+test('NextのACTIVE候補と空の在庫API応答では通知も在庫履歴も作らない', async () => {
+  const timestamp = Date.now();
+  let posts = 0;
+  const selectedProduct = {
+    styleColor: TARGET,
+    groupKey: 'mind-group',
+    globalProductId: `global-${TARGET}`,
+    productInfo: { fullTitle: `Nike Mind 001 ${TARGET}`, url: urlFor(TARGET) },
+    sizes: [{ merchSkuId: 'sku-27', localizedLabel: '27', label: '27', status: 'ACTIVE' }],
+  };
+  const engine = createMonitorEngine({
+    env: environment([TARGET], { DISCORD_WEBHOOK: WEBHOOK }),
+    state: cache(timestamp, { lastObservedStockKey: '' }),
+    now: () => timestamp,
+    fetchImpl: async (url) => {
+      if (url.startsWith('https://discord.com')) {
+        posts += 1;
+        return new Response(null, { status: 204 });
+      }
+      if (url.includes('/product_details_availability/')) {
+        return Response.json({ groupKey: 'mind-group', sizes: [] });
+      }
+      return new Response(`<script id="__NEXT_DATA__">${JSON.stringify({
+        props: { pageProps: { selectedProduct } },
+      })}</script>`);
+    },
+  });
+
+  const outcome = await engine.tick();
+  const state = engine.snapshot();
+  assert.equal(outcome.notified, false);
+  assert.equal(posts, 0);
+  assert.equal(state.knownProducts[TARGET].lastResult.availabilityState, 'unknown');
+  assert.equal(state.knownProducts[TARGET].pendingNotification, null);
+  assert.deepEqual(state.history, []);
 });
 
 test('upcoming items keep the thirty second cadence across cache rehydration', async () => {

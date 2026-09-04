@@ -1,15 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  createHealthNotificationPayload,
+  DEFAULT_STATUS_PAGE_URL,
   evaluateMonitorHealth,
   evaluateStatusFetchFailure,
   evaluateWorkerHealth,
+  resolveStatusPageUrl,
   shouldNotifyHealthTransition,
 } from '../src/health.js';
 
 test('private Worker health checks actual scheduling, notifications and mode without product data', () => {
   const now = Date.parse('2026-09-05T00:00:00Z');
   const healthy = { mode: 'active', webhookConfigured: true, healthy: true,
+    monitorHealthy: true, backupHealthy: true, backupFailureStreak: 0,
+    lastBackupAt: new Date(now - 60000).toISOString(),
     lastCompletedAt: new Date(now - 60000).toISOString(), nextAlarmAt: new Date(now + 60000).toISOString() };
   assert.equal(evaluateWorkerHealth(healthy, { now }).healthy, true);
   for (const override of [{ mode: 'paused' }, { mode: 'shadow' }, { webhookConfigured: false },
@@ -19,6 +24,39 @@ test('private Worker health checks actual scheduling, notifications and mode wit
     assert.equal(evaluateWorkerHealth({ ...healthy, ...override }, { now }).healthy, false);
   }
   assert.equal(evaluateWorkerHealth({}, { now }).healthy, false);
+});
+
+test('private Worker health reports persisted backup failure and stale backup states', () => {
+  const now = Date.parse('2026-09-05T00:00:00Z');
+  const base = {
+    mode: 'active', webhookConfigured: true, healthy: false, monitorHealthy: true,
+    lastCompletedAt: new Date(now - 60000).toISOString(), nextAlarmAt: new Date(now + 60000).toISOString(),
+  };
+  assert.match(evaluateWorkerHealth({ ...base, backupHealthy: false, backupFailureStreak: 2 }, { now }).reason, /継続的な失敗/);
+  assert.match(evaluateWorkerHealth({ ...base, backupHealthy: false, backupFailureStreak: 0 }, { now }).reason, /24時間以上/);
+});
+
+test('health notification links only to a validated private viewer root', () => {
+  assert.equal(resolveStatusPageUrl(undefined), DEFAULT_STATUS_PAGE_URL);
+  assert.equal(
+    resolveStatusPageUrl('https://viewer.example.test/private?token=must-not-leak#detail'),
+    'https://viewer.example.test/',
+  );
+  for (const invalid of [
+    'http://viewer.example.test/',
+    'javascript:alert(1)',
+    'https://user:password@viewer.example.test/',
+    'https://viewer.example.test:8443/',
+  ]) assert.equal(resolveStatusPageUrl(invalid), DEFAULT_STATUS_PAGE_URL);
+
+  const payload = createHealthNotificationPayload(
+    { healthy: false, reason: 'backup failed', updatedAt: '2026-09-05T00:00:00Z' },
+    'https://viewer.example.test/path?secret=value',
+    { now: Date.parse('2026-09-05T00:01:00Z') },
+  );
+  assert.equal(payload.embeds[0].url, 'https://viewer.example.test/');
+  assert.equal(JSON.stringify(payload).includes('secret=value'), false);
+  assert.match(payload.embeds[0].title, /異常/);
 });
 
 test('更新時刻が閾値内なら正常と判定する', () => {

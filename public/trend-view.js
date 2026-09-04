@@ -173,6 +173,7 @@ export function createTrendView(root = document) {
       remarks.push('棒の高さは、その時間帯に入荷を検出した件数です。');
     }
     if (summary.notes?.productsTruncated) remarks.push('商品数が多いため、選択肢の一部を省略しています。');
+    if (typeof summary.notes?.verificationLabel === 'string') remarks.push(summary.notes.verificationLabel);
     message.textContent = remarks.join(' ');
     renderChart(hours, maxCount);
     if (renderedAnalytics !== summary.analytics) {
@@ -358,9 +359,15 @@ function validateSummary(summary, filters) {
     totalCount += item.count;
   }
   if (totalCount !== summary.totalEvents) invalid();
-  for (const date of [summary.period.retainedFrom, summary.period.retainedTo]) {
-    if (date !== null && (typeof date !== 'string' || !Number.isFinite(Date.parse(date)))) invalid();
+  for (const date of [summary.period.retainedFrom, summary.period.retainedTo,
+    summary.period.verifiedFrom, summary.period.countedFrom]) {
+    if (date !== undefined && date !== null &&
+        (typeof date !== 'string' || !Number.isFinite(Date.parse(date)))) invalid();
   }
+  if (summary.period.excludedUnverifiedEvents !== undefined &&
+      !nonNegativeInteger(summary.period.excludedUnverifiedEvents)) invalid();
+  if (summary.notes?.verificationLabel !== undefined &&
+      typeof summary.notes.verificationLabel !== 'string') invalid();
   if (summary.analytics !== undefined && !validAnalytics(summary.analytics)) invalid();
 }
 

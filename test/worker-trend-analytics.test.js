@@ -28,6 +28,13 @@ function fixture(t, initialNow = Date.parse('2026-09-06T14:30:00Z')) {
   };
 }
 
+function setVerifiedFrom(documents, database, at) {
+  const metadata = documents.archiveMetadata();
+  metadata.verifiedFrom = new Date(at).toISOString();
+  database.prepare("UPDATE monitor_documents SET value = ? WHERE name = 'trend-meta' AND part = 0")
+    .run(JSON.stringify(metadata));
+}
+
 const observation = (styleColor, observedAt, availability, extra = {}) => ({
   styleColor, observedAt: new Date(observedAt).toISOString(), availability,
   expectedIntervalSeconds: 120, ...extra,
@@ -67,6 +74,7 @@ test('coverage aggregation handles whole JST weeks without changing weekday/hour
   const { documents, database } = fixture(t, now);
   documents.getTrends();
   database.prepare('UPDATE monitor_analysis_meta SET started_at = ? WHERE id = 1').run(start);
+  setVerifiedFrom(documents, database, start);
   database.prepare('INSERT INTO monitor_product_coverage VALUES (?, ?, ?)').run(FIRST, start, now);
   const analytics = documents.getTrends({ styleColor: FIRST, days: 30 }).analytics;
   assert.equal(analytics.coverage.observedProductHours, 192);
@@ -101,6 +109,8 @@ test('excluded gap counts honor both product and rolling-period filters', (t) =>
   const now = Date.parse('2026-09-10T00:00:00Z');
   const { documents, database } = fixture(t, now);
   documents.getTrends();
+  setVerifiedFrom(documents, database, now - 8 * DAY);
+  database.prepare('UPDATE monitor_analysis_meta SET started_at = ? WHERE id = 1').run(now - 8 * DAY);
   const insert = database.prepare('INSERT INTO monitor_analysis_gaps VALUES (?, ?, ?)');
   insert.run(FIRST, now - 8 * DAY, 'unavailable');
   insert.run(FIRST, now - DAY, 'long_gap');
@@ -174,10 +184,14 @@ test('comparison uses equal disjoint 30-day periods and refuses small samples', 
   const split = now - 30 * DAY;
   const beginning = now - 60 * DAY;
   database.prepare('UPDATE monitor_analysis_meta SET started_at = ? WHERE id = 1').run(beginning);
+  setVerifiedFrom(documents, database, beginning);
   database.prepare('INSERT INTO monitor_product_coverage VALUES (?, ?, ?)').run(FIRST, beginning, now);
   for (const at of [beginning, beginning + DAY, split - 1, split, split + DAY, split + 2 * DAY,
     split + 3 * DAY, split + 4 * DAY, split + 5 * DAY]) {
     database.prepare('INSERT INTO monitor_restock_events VALUES (?, ?)').run(FIRST, at);
+    database.prepare(`INSERT INTO monitor_sellout_episodes
+      (style_color, started_at, restock_lower_at, last_in_stock_at) VALUES (?, ?, ?, ?)`)
+      .run(FIRST, at, at - 1, at);
   }
   const comparison = documents.getTrends({ styleColor: FIRST, days: 7 }).analytics.comparison;
   assert.equal(comparison.previous.events, 3);
@@ -209,6 +223,88 @@ test('legacy restocks remain in the archive but do not become analytics numerato
   assert.equal(analytics.sellout.sampleCount, 0);
   assert.equal(analytics.sellout.medianMinutes, null);
   assert.equal(analytics.comparison.status, 'insufficient');
+});
+
+test('an imported history after analytics initialization stays out of the observation-rate numerator', async (t) => {
+  const start = Date.parse('2026-09-06T00:00:00Z');
+  const { documents, setNow } = fixture(t, start);
+  documents.getTrends();
+
+  const importedAt = start + 60 * MINUTE;
+  setNow(start + 2 * 60 * MINUTE);
+  const imported = event(FIRST, importedAt);
+  await documents.commit({ state: { history: [imported] } }, {
+    analyticsBoundary: { at: new Date(start + 2 * 60 * MINUTE).toISOString(), reason: 'imported' },
+  });
+
+  let summary = documents.getTrends({ styleColor: FIRST, days: 7 });
+  assert.equal(summary.totalEvents, 1);
+  assert.equal(summary.analytics.weekdayHours.cells.reduce((total, cell) => total + cell.restockEvents, 0), 0);
+  assert.equal(summary.analytics.comparison.current.events, 0);
+
+  const observedOut = start + 3 * 60 * MINUTE;
+  setNow(observedOut);
+  await documents.commit({ state: { history: [imported] } }, {
+    observation: observation(FIRST, observedOut, 'out_of_stock'),
+  });
+  const observedRestock = start + 3 * 60 * MINUTE + 2 * MINUTE;
+  setNow(observedRestock);
+  await documents.commit({ state: { history: [event(FIRST, observedRestock), imported] } }, {
+    observation: observation(FIRST, observedRestock, 'in_stock', { restockDetected: true }),
+  });
+
+  summary = documents.getTrends({ styleColor: FIRST, days: 7 });
+  assert.equal(summary.totalEvents, 2);
+  assert.equal(summary.analytics.weekdayHours.cells.reduce((total, cell) => total + cell.restockEvents, 0), 1);
+  assert.equal(summary.analytics.comparison.current.events, 1);
+});
+
+test('analytics applies the same whitespace and case normalization as the archive filter', async (t) => {
+  const start = Date.parse('2026-09-06T00:00:00Z');
+  const { documents, setNow } = fixture(t, start);
+  await documents.commit({ state: { history: [] } }, {
+    observation: observation(FIRST, start, 'out_of_stock'),
+  });
+  setNow(start + 2 * MINUTE);
+  await documents.commit({ state: { history: [event(FIRST, start + 2 * MINUTE)] } }, {
+    observation: observation(FIRST, start + 2 * MINUTE, 'in_stock', { restockDetected: true }),
+  });
+
+  const exact = documents.getTrends({ styleColor: FIRST, days: 7 });
+  const padded = documents.getTrends({ styleColor: ` ${FIRST.toLowerCase()} `, days: 7 });
+  const upperAll = documents.getTrends({ styleColor: 'ALL', days: 7 });
+  assert.equal(padded.styleColor, FIRST);
+  assert.deepEqual(padded.analytics, exact.analytics);
+  assert.deepEqual(upperAll.analytics, documents.getTrends({ styleColor: 'all', days: 7 }).analytics);
+});
+
+test('the evidence boundary excludes old episodes, coverage and gaps from every analysis', (t) => {
+  const now = Date.parse('2026-09-10T00:00:00Z');
+  const boundary = now - DAY;
+  const { documents, database } = fixture(t, now);
+  documents.getTrends();
+  setVerifiedFrom(documents, database, boundary);
+  database.prepare('UPDATE monitor_analysis_meta SET started_at = ? WHERE id = 1').run(now - 3 * DAY);
+  database.prepare('INSERT INTO monitor_product_coverage VALUES (?, ?, ?)').run(FIRST, now - 2 * DAY, boundary - 1);
+  database.prepare('INSERT INTO monitor_product_coverage VALUES (?, ?, ?)').run(FIRST, boundary, now);
+  database.prepare('INSERT INTO monitor_analysis_gaps VALUES (?, ?, ?)').run(FIRST, now - 2 * DAY, 'old');
+  database.prepare('INSERT INTO monitor_analysis_gaps VALUES (?, ?, ?)').run(FIRST, boundary, 'new');
+  const insertEpisode = database.prepare(`INSERT INTO monitor_sellout_episodes
+    (style_color, started_at, restock_lower_at, last_in_stock_at, ended_at,
+     min_duration_ms, max_duration_ms, censored) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`);
+  insertEpisode.run(FIRST, now - 2 * DAY, now - 2 * DAY, now - 2 * DAY, now - 2 * DAY + MINUTE, MINUTE, MINUTE);
+  insertEpisode.run(FIRST, boundary + MINUTE, boundary, boundary + MINUTE, boundary + 2 * MINUTE, MINUTE, MINUTE);
+
+  const analytics = documents.getTrends({ styleColor: FIRST, days: 7 }).analytics;
+  assert.equal(analytics.coverage.recordingStartedAt, new Date(boundary).toISOString());
+  assert.equal(analytics.coverage.observedProductHours, 24);
+  assert.equal(analytics.coverage.reliableSegments, 1);
+  assert.equal(analytics.coverage.excludedGaps, 1);
+  assert.equal(analytics.weekdayHours.cells.reduce((sum, cell) => sum + cell.restockEvents, 0), 1);
+  assert.equal(analytics.sellout.sampleCount, 1);
+  assert.equal(analytics.sellout.medianMinutes, 1);
+  assert.equal(analytics.comparison.current.events, 1);
+  assert.equal(analytics.comparison.previous.events, 0);
 });
 
 test('analytics and state roll back atomically, while duplicate/invalid observations are harmless', async (t) => {

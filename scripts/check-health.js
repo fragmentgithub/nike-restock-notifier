@@ -3,9 +3,11 @@ import { normalizeDiscordWebhook, postDiscordWebhook } from '../src/discord.js';
 import { readJsonFile, writeJsonFileAtomic } from '../src/json-file.js';
 import { CLOUDFLARE_HEALTH_URL, githubHealthHeaders } from './github-health-auth.js';
 import {
+  createHealthNotificationPayload,
   evaluateMonitorHealth,
   evaluateStatusFetchFailure,
   evaluateWorkerHealth,
+  resolveStatusPageUrl,
   shouldNotifyHealthTransition,
 } from '../src/health.js';
 
@@ -16,6 +18,7 @@ const statusUrl = validHttpUrl(
   'STATUS_URL',
 );
 const webhook = configuredDiscordWebhook(process.env.DISCORD_WEBHOOK || '');
+const statusPageUrl = resolveStatusPageUrl(process.env.STATUS_PAGE_URL);
 const staleMinutes = clampNumber(process.env.HEALTH_STALE_MINUTES, 50, 10, 360);
 
 await mkdir(STATE_DIR, { recursive: true });
@@ -41,7 +44,7 @@ const currentState = health.healthy ? 'healthy' : 'unhealthy';
 const changed = previous.status !== currentState;
 let notifiedStatus = previous.notifiedStatus;
 if (shouldNotifyHealthTransition(previous.notifiedStatus, currentState) && webhook) {
-  await sendHealthNotification(webhook, health, statusUrl);
+  await sendHealthNotification(webhook, health, statusPageUrl);
   notifiedStatus = currentState;
 }
 
@@ -57,20 +60,7 @@ await writeJsonFileAtomic(STATE_PATH, {
 console.log(JSON.stringify({ status: currentState, changed, ...health }, null, 2));
 
 async function sendHealthNotification(url, result, pageUrl) {
-  const recovered = result.healthy;
-  await postDiscordWebhook(url, {
-    allowed_mentions: { parse: [] },
-    embeds: [{
-      title: recovered ? 'Nike監視が復旧しました' : 'Nike監視の更新が停止しています',
-      description: recovered ? 'ステータス更新が正常範囲へ戻りました。' : result.reason,
-      url: pageUrl.replace(/\/status\.json(?:\?.*)?$/, '/'),
-      color: recovered ? 0x26734d : 0xa43f3a,
-      fields: result.updatedAt
-        ? [{ name: '最終更新', value: `<t:${Math.floor(Date.parse(result.updatedAt) / 1000)}:R>` }]
-        : [],
-      timestamp: new Date().toISOString(),
-    }],
-  });
+  await postDiscordWebhook(url, createHealthNotificationPayload(result, pageUrl));
 }
 
 function validHttpUrl(value, name) {

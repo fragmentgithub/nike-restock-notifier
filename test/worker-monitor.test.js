@@ -100,7 +100,66 @@ test('the cron backup guard creates at most one automatic generation per UTC day
   };
   assert.equal((await controller.ensureBackedUp()).created, true);
   assert.equal((await controller.ensureBackedUp()).created, false);
+  assert.deepEqual(controller.documents.read('control'), {
+    mode: 'paused',
+    lastBackupAt: new Date(now).toISOString(),
+    backupFailureStreak: 0,
+    lastBackupError: null,
+  });
+  assert.equal((await controller.health()).backupHealthy, true);
   now += 86400000;
   assert.equal((await controller.ensureBackedUp()).created, true);
   assert.equal(creates, 2);
+});
+
+test('backup failures persist generically across restarts and a later success restores health', async (t) => {
+  let now = NOW;
+  let shouldFail = true;
+  let creates = 0;
+  const { controller, storage } = fixture(t, { now: () => now });
+  const backup = {
+    latest: async () => null,
+    createDaily: async () => {
+      creates += 1;
+      if (shouldFail) throw new Error('provider failure with private-token-value');
+      return { generation: `generation-${creates}`, createdAt: new Date(now).toISOString() };
+    },
+  };
+  controller.backup = backup;
+
+  await assert.rejects(controller.ensureBackedUp(), {
+    message: 'Daily backup failed; automatic retry is scheduled.',
+  });
+  assert.equal(controller.documents.read('control').backupFailureStreak, 1);
+  assert.equal(JSON.stringify(controller.documents.read('control')).includes('private-token-value'), false);
+
+  const restarted = new MonitorController({ storage }, {}, { now: () => now });
+  restarted.backup = backup;
+  assert.equal((await restarted.health()).backupHealthy, false);
+  await assert.rejects(restarted.ensureBackedUp());
+  assert.equal(restarted.documents.read('control').backupFailureStreak, 2);
+
+  shouldFail = false;
+  const recovered = await restarted.backupNow();
+  assert.equal(recovered.ok, true);
+  assert.equal((await restarted.health()).healthy, true);
+  assert.equal(restarted.documents.read('control').backupFailureStreak, 0);
+  assert.equal(restarted.documents.read('control').lastBackupError, null);
+
+  now += 24 * 60 * 60 * 1000;
+  assert.equal((await restarted.health()).backupHealthy, true);
+  now += 1;
+  const stale = await restarted.health();
+  assert.equal(stale.backupHealthy, false);
+  assert.equal(stale.healthy, false);
+});
+
+test('health discovers the latest backup when upgrading an old control record', async (t) => {
+  const { controller } = fixture(t);
+  controller.backup = {
+    latest: async () => ({ createdAt: new Date(NOW - 60000).toISOString() }),
+  };
+  const health = await controller.health();
+  assert.equal(health.backupHealthy, true);
+  assert.equal(health.lastBackupAt, new Date(NOW - 60000).toISOString());
 });
