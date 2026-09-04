@@ -1,43 +1,48 @@
 # Handoff for Claude
 
-## Cloudflare移行作業（2026-09-05、以前の運用方針より優先）
+## Cloudflare本番運用（2026-09-05、以前の運用方針より優先）
 
-ユーザーがCloudflareへの移行を依頼。Workers + SQLite Durable Objectの実装を追加し、移行先は `https://nike-restock-notifier.only-this-moment.workers.dev/`。本番切り替えは未実施で、GitHub監視は稼働継続中。
+本番監視はWorkers + SQLite Durable Objectへ移行済み。公開URLは `https://nike-restock-notifier.only-this-moment.workers.dev/`。2026-09-04 16:32:30 UTC（2026-09-05 01:32 JST）に `active` モードへ切り替え、実際のalarm起動と商品取得、`healthy: true`、`webhookConfigured: true` を確認した。旧GitHub監視は停止済み。
 
 - `wrangler.jsonc` がCloudflareの構成。初期モードは `paused`。DOクラス `NikeMonitor`、識別名 `nike-jp`、migration tag `v1` は維持する。
 - 監視エンジンは `src/monitor-engine.js`。通常2分・発売前30秒を目安に、1回のalarmで1商品または探索1ページだけ確認する。
 - 管理操作は `ADMIN_TOKEN` Secretで保護。Discord通知は `DISCORD_WEBHOOK` Secret。
 - `npm run cloudflare:build` で公開なし検証、`npm run cloudflare:deploy` で公開する。
-- GitHub側は `MONITOR_BACKEND=cloudflare` に切り替えると監視・自己連鎖をスキップし、Pagesを移転案内にする。health workflowはCloudflareのstatus.jsonを外側から確認する（GitHub監視の自動再起動は無効）。
-- 2026-09-05にユーザーが移行先への新規 `ADMIN_TOKEN` と既存 `DISCORD_WEBHOOK` の登録を明示承認。`ADMIN_TOKEN` の登録は完了済み。Webhookの引き継ぎと本番切り替えは準備中。
+- GitHub側は `MONITOR_BACKEND=cloudflare` に設定済み。監視・自己連鎖をスキップし、Pagesを移転案内にする。health workflowはCloudflareのstatus.jsonを外側から確認する（GitHub監視の自動再起動は無効）。
+- 2026-09-05にユーザーが移行先への新規 `ADMIN_TOKEN` と既存 `DISCORD_WEBHOOK` の登録を明示承認。両方のWorkers Secret登録が完了済み。
+- 最終直接転送run `33895582921` が `nike-monitor-state-33893233043` に完全一致して復元し、8商品、品質サンプル756件、在庫履歴28件、イベント80件を取り込んだ。通知済みキーは初回転送run `33894859942` と一致。件数は取り込み時の値で、以後の取得により変化する。
 - 手動 `cloudflare-transfer.yml` は既存Actions cacheの通知済み状態、許可した通常設定、RSA-OAEP SHA256で暗号化したWebhookを、GitHubから移行先 `/migration/transfer` へ直接送る。受信側はGitHub OIDCのリポジトリ・所有者ID・main・指定の手動workflow・audienceを検証し、paused時だけ取り込む。GitHubにCloudflareの管理キーを追加登録しない。
+- 移行完了後に `cloudflare-transfer.yml` を無効化し、GitHub variable `CLOUDFLARE_MIGRATION_PUBLIC_KEY`、Cloudflareの一時暗号文、ローカルの一時 `webhook.enc` を削除済み。再移行する場合はworkflowを有効化し、既存の移行用公開鍵を再登録する。
 - GitHub artifactへの暗号化Webhookの追加保存は別途自動承認レビューで拒否されたため、`cloudflare-export.yml` は削除し、転送手順を直接送信へ変更した。`scripts/export-cloudflare-state.js` は検証用関数と既存テスト用に残るが、artifact workflowは使用しない。
-- 転送された暗号文はCloudflareに非公開で一時保存される。`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で取得し、`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` でWorkers Secretへ登録する。登録成功後に `node scripts/cloudflare-admin.js clear-credential` で一時保存した暗号文を削除する。
+- 転送された暗号文はCloudflareに非公開で一時保存される。`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で取得し、`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` でWorkers Secretへ登録する。登録成功後に `node scripts/cloudflare-admin.js clear-credential "実行ID:試行番号"` で一時保存した暗号文を削除する。必須引数には対象転送の `migrationId` を指定する。
 - 最終転送前はGitHubのhealthとpages workflowを無効化し、未開始の待機実行を取り消す。進行中の監視は状態保存まで自然終了させ、最終キャッシュの正確なキーを `cloudflare-transfer.yml` の `cache_key` に指定する。公開status.jsonからの通知状態再構成は不可。
-- 接続確認では固定初期商品 `HQ4307-005` とFragmentページがCloudflare・GitHubの双方で404。一方、Cloudflareの商品探索は現行商品4件を取得できた。現行商品の個別取得を引き続き確認する。
-- 移行手順と管理コマンドは [CLOUDFLARE.md](CLOUDFLARE.md)。旧GitHub監視は最終状態を保存するまで維持し、切り替え完了後に実施結果を記録する。
+- 接続確認では固定初期商品 `HQ4307-005` とFragmentページがCloudflare・GitHubの双方で404。一方、Cloudflareの商品探索とshadow監視では現行4商品の商品ページ取得に成功。`HQ4307-200`、`HQ4307-300`、`HQ4307-302` の自動休止が解除され、通知済みキーと在庫履歴が維持されたことを確認した。
+- 最後の旧run `33893233043` は監視・状態保存・Pagesのジョブが成功。キャッシュは2026-09-04 16:29:55 UTCに保存された。後続の自己連鎖ジョブだけが、意図したworkflow無効化により422で終了した。最終状態の保存失敗ではない。
+- Pages転送run `33895727520` は成功し、旧監視ジョブと自己連鎖ジョブはスキップされた。ブラウザーで旧GitHub Pages URLからCloudflareへの自動遷移と、「自動監視中」「Discord通知設定済み」、8追跡・現行4商品の取得成功を確認済み。`pages.yml` は転送公開後に無効化した。
+- 外側health run `33895756834` は成功。旧GitHub監視の復旧stepはスキップし、Cloudflareのstatus.jsonを読み取って `healthy: true`、`changed: false` を確認した。`health.yml` は有効のまま継続する。移行に必要な確認はすべて完了。
+- 運用手順と管理コマンドは [CLOUDFLARE.md](CLOUDFLARE.md)。
 - `.cloudflare-migration/` はgit対象外の一時作業領域。既存キーを作り直さず利用する。ログ・ツール出力・公開ファイルへ内容を出さない。
 
-以下は従来GitHub運用の記録。Cloudflare移行完了後に本節を更新する。
+以下は移行前のGitHub方式を記録した参考資料です。現在の運用指示・再起動手順としては使用せず、冒頭の移行状況と [CLOUDFLARE.md](CLOUDFLARE.md) を優先してください。
 
 作業日: 2026-07-09 JST
 
-## 運用方針(重要)
+## 旧GitHub方式の運用方針（参考記録）
 
-**このアプリはローカルでは動かさない。監視・通知・表示はすべてGitHub上で完結させる。**
+移行前は監視・通知・表示をGitHub上で運用し、ローカルはコード編集と表示確認に使用していた。
 
 - 定期監視とDiscord通知: GitHub Actions (`pages.yml`)
 - ステータス表示: GitHub Pages(静的ページ + `status.json`)
 - 設定変更: GitHubのリポジトリ変数/シークレット(`gh` CLIまたはWeb UI)
 - ローカルリポジトリはコード編集とpushのためだけに使う
 
-ローカルの `npm start` は `scripts/serve-pages.js` でPages表示だけをプレビューする。監視と設定変更はGitHub Actions専用。
+ローカルの `npm start` は `scripts/serve-pages.js` で表示だけをプレビューする。旧方式では監視と設定変更をGitHub Actionsで実行していた。
 
-## 概要
+## 旧GitHub方式の概要
 
 Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNikeの商品ページを確認し、在庫が出たらDiscordへ通知する。結果はGitHub Pagesに静的表示される。
 
-## 重要URL
+## 旧GitHub方式のURL
 
 - GitHub repo: https://github.com/fragmentgithub/nike-restock-notifier
 - GitHub Pages: https://fragmentgithub.github.io/nike-restock-notifier/
@@ -45,21 +50,21 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
 - 監視対象: https://www.nike.com/jp/t/nike-mind-001-%E3%83%97%E3%83%AC%E3%82%B2%E3%83%BC%E3%83%A0%E2%81%A0-%E3%83%9F%E3%83%A5%E3%83%BC%E3%83%AB-8cpWgYfX/HQ4307-005
 - Fragment監視対象: https://www.nike.com/jp/launch/t/mind-001-fragment-black / https://www.nike.com/jp/launch/t/mind-002-fragment-black
 
-## 現在の状態
+## 旧GitHub方式の設定記録
 
 - Branch: `main`
 - Local repo: `C:\Users\star_\Documents\ni_re`(編集・push用)
 - Discord secret: `DISCORD_WEBHOOK` はGitHub Actions secretsに設定済み
-- Current size filter: 空(= 全サイズ対象)
+- 記録時のsize filter: 空(= 全サイズ対象)
 - 監視方式: **商品別due時刻方式**。`INTERVAL_SECONDS` は通常商品の商品ごとの再確認間隔。直近の時間窓で複数商品の取得がすべて失敗した場合だけ最大10分まで自動バックオフする(1商品だけの失敗ではフリート全体の間隔を延ばさない)。
 - 直近のrun結果・在庫状況・現在のコミットは時間で変わるためここには固定しない。次で確認する:
   - コミット/ツリー: `git log --oneline -5` / `git status`
   - 監視run: `gh run list --repo fragmentgithub/nike-restock-notifier --limit 5`
   - 在庫: `curl.exe -s https://fragmentgithub.github.io/nike-restock-notifier/status.json`
 
-## Architecture
+## 旧GitHub方式の構成
 
-### GitHub Actions + Pages(現行運用)
+### GitHub Actions + Pages（移行前）
 
 - `.github/workflows/pages.yml`
   - トリガー: push(main)、workflow_dispatch、cron `7,37 * * * *`
@@ -122,9 +127,9 @@ Nikeの商品リストック監視アプリ。GitHub Actionsが定期的にNike�
 
 - `scripts/serve-pages.js`: `public/` の読み取り専用ローカルプレビュー
 
-## Commands
+## 旧GitHub方式の操作例（参考記録）
 
-運用操作は `gh` CLI、ローカル検証は Node 24で行う。
+移行前は運用操作に `gh` CLI、ローカル検証にNode 24を使用していた。以下は旧方式の操作例で、現在の再起動・切り戻し手順ではない。
 
 監視を手動実行:
 
@@ -167,9 +172,9 @@ $env:LOOP_MINUTES='0'; node scripts/monitor.js
 git checkout -- public/status.json
 ```
 
-運用はGitHub Actionsのみ。
+移行前の本番監視はGitHub Actionsで実行していた。
 
-## GitHub Settings
+## 旧GitHub方式の設定一覧
 
 Actions secrets:
 
@@ -203,7 +208,7 @@ GitHub PagesのソースはWorkflowベース。再有効化が必要な場合:
 gh api --method POST repos/fragmentgithub/nike-restock-notifier/pages -f build_type=workflow
 ```
 
-## Known Caveats
+## 旧GitHub方式の注意事項
 
 - **git内の `public/status.json` は古いスナップショット。** monitor.jsがActions実行中に上書きしてPagesへデプロイするだけで、gitにはコミットバックしない。最新データはPages上の `status.json` にしかない。git内のファイルの日付や `discordWebhookSet: false` を見て混乱しないこと。
 - **60日ルール:** GitHubはリポジトリに60日間アクティビティがないとscheduled workflowを自動無効化する。コミットなしで長期運用する場合、これが最も現実的な停止リスク。定期的にpushするか、無効化されたらActionsタブから再有効化する。
@@ -218,7 +223,7 @@ gh api --method POST repos/fragmentgithub/nike-restock-notifier/pages -f build_t
 - ローカルでの編集作業時: PowerShellの `Get-Content` は日本語をmojibakeで表示することがある(ファイル自体はUTF-8で正常)。`git status` が `C:\Users\star_/.config/git/ignore` の権限警告を出すことがあるが、commit/pushは阻害されない。
 - `.monitor-state/` はコミットしない(意図的にignore済み)。
 
-## Suggested Next Work
+## 旧方式で検討していた追加機能（未採用の記録）
 
 1. 監視履歴をActions cacheより長期保存したくなった場合は、Firestore等の外部ストレージを検討する。
 2. 必要に応じて、商品ごとの長期在庫履歴とグラフ表示を追加する。

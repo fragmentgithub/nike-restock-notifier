@@ -1,17 +1,17 @@
 # Nike Restock Notifier
 
-## Cloudflareへの移行準備（2026-09-05）
+## Cloudflareで本番監視中（2026-09-05）
 
-Cloudflare版を追加しました。移行先は https://nike-restock-notifier.only-this-moment.workers.dev/ です。
-**現在は移行準備中で、GitHub側の本番監視を継続しています。** Cloudflareへの管理キー・既存Discord Webhookの登録はユーザー承認済みで、管理キーは登録済みです。Nikeへの接続確認と、最新の通知済み状態・Webhookの引き継ぎ後に切り替えます。
+ステータスページ: https://nike-restock-notifier.only-this-moment.workers.dev/
+**2026-09-05 01:32 JSTに本番監視をCloudflareへ切り替えました。** 8商品の監視状態、通知済み情報、在庫履歴を引き継ぎ、Discord通知を有効にしています。Cloudflareでの定期起動・商品取得・正常状態を確認済みです。
 
-移行データは `cloudflare-transfer.yml` からCloudflareへ直接送ります。GitHub OIDCで送信元を確認し、Webhookは暗号化して転送します。
+旧GitHub監視は停止済みです。旧GitHub Pages URLは新しいページへ自動で移動します。GitHubにはソースコード・CI・Cloudflareの更新停止を確認するhealth workflowを残しています。
 
 Cloudflare版の構成・操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。以下は切り替え前のGitHub運用の説明です。
 
-Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメント」を含むNike商品を定期確認し、対象サイズが在庫ありになったらDiscordへ通知するアプリです。すべてGitHub上で動きます。
+Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメント」を含むNike商品を定期確認し、対象サイズが在庫ありになったらDiscordへ通知するアプリです。
 
-## 仕組み
+## 旧GitHub方式の仕組み
 
 - GitHub Actionsが商品ごとの次回確認時刻を管理し、通常は各商品を約2分間隔で確認します
 - メンズの既知カラーを商品ごとに監視し、ウィメンズ商品は除外します
@@ -26,7 +26,7 @@ Nike Mind 001のメンズ商品と、商品名に「Fragment / フラグメン�
 
 ステータスページ: https://fragmentgithub.github.io/nike-restock-notifier/
 
-## 設定
+## 旧GitHub方式の設定
 
 GitHubのリポジトリ設定で以下を追加します。
 
@@ -78,7 +78,7 @@ Secret設定後のテストは、GitHub Actionsの `Discord Test` workflowを手
 商品別の `mention: ""` は、その商品だけグローバルメンションを明示的に無効化します。
 JSONが不正な場合は安全のため商品確認と通知を停止し、Pagesに設定エラーを表示します。既定設定へ暗黙に戻ることはありません。
 
-## 注意
+## 旧GitHub方式の注意
 
 - 実行が終わると、監視対象があり、次の商品確認が「次のrunの実行時間内」かつ30分以内の場合だけ次の実行を自動で起動します。単発モード・監視対象なし・それより先の確認は自己起動を省略し、30分間隔のcronへ引き継ぎます
 - 異常終了時は30分間隔のスケジュール実行がバックアップとして再開します
@@ -88,6 +88,6 @@ JSONが不正な場合は安全のため商品確認と通知を停止し、Page
 
 ## ローカル確認
 
-`npm start` はGitHub Pagesと同じ `public/` を読み取り専用でプレビューします。監視・通知・設定変更はGitHub Actionsだけで実行されます。
+`npm start` は `public/` の画面を読み取り専用でプレビューします。監視・通知は起動しません。Cloudflareの運用操作は [CLOUDFLARE.md](CLOUDFLARE.md) を参照してください。
 
 開発の引き継ぎ情報は [HANDOFF.md](HANDOFF.md) を参照してください。

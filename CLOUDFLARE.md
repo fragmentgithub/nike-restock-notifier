@@ -2,7 +2,11 @@
 
 移行先: https://nike-restock-notifier.only-this-moment.workers.dev/
 
-2026-09-05時点では移行準備中で、GitHubの本番監視を継続しています。Cloudflareへの管理キー・既存Discord Webhookの登録はユーザー承認済みで、管理キーの登録が完了しています。Nikeへの接続確認と、最新状態・Webhookの引き継ぎ後に本番を切り替えます。
+2026-09-05 01:32 JSTに本番監視をCloudflareへ切り替えました。管理キー・既存Discord Webhookの登録と、GitHubの最終状態の引き継ぎが完了し、現在は通知が有効な `active` モードです。実際の定期起動と商品取得、監視の正常状態を確認しました。
+
+GitHub側は `MONITOR_BACKEND=cloudflare` に設定済みで、旧監視は停止しています。旧GitHub Pages URLから新しいページへの自動遷移と、Cloudflareを外側から確認するhealth workflowの正常動作も確認済みです。`pages.yml` は移転案内の公開後に無効化し、`health.yml` は有効にしています。
+
+移行用workflowは無効化し、GitHubの一時公開鍵、Cloudflareとローカルの一時暗号文は削除済みです。
 
 ## 構成
 
@@ -43,14 +47,16 @@
 
 ## 移行と切り戻し
 
-1. `npm run cloudflare:build`、`npm test` を実行し、`npm run cloudflare:deploy` で一時停止状態のCloudflare版を公開します。
+以下は移行を再実施する場合の手順です。現在は `cloudflare-transfer.yml` が無効で、GitHubの移行用公開鍵も削除されています。再実施にはworkflowの有効化と公開鍵の再登録が必要です。既存の管理キー・暗号化用秘密鍵は引き続き使います。
+
+1. `npm run cloudflare:build`、`npm test` を実行し、`npm run cloudflare:deploy` でCloudflare版を公開・更新します。新規作成時は一時停止ですが、更新時は既存の運転モードを維持します。
 2. 移行先へ専用 `ADMIN_TOKEN` を登録し、`node scripts/cloudflare-admin.js probe mind`、`probe fragment`、`probe catalog` で商品・発売ページ・探索を検証します。固定の商品URLが404の場合は、探索で見つかった現行商品でも確認します。
 3. 暗号化用鍵が未作成なら `node scripts/prepare-cloudflare-key.js` で作ります。公開鍵 `.cloudflare-migration/export-public.pem` だけをGitHub variable `CLOUDFLARE_MIGRATION_PUBLIC_KEY` に登録します。秘密鍵はこの端末に保管し、作成済みの鍵は引き続き使います。
 4. Cloudflareを `mode paused` にし、`main` の手動workflow `cloudflare-transfer.yml` を実行します。検証時は `cache_key` を空にすると最新のActions cacheを復元します。監視状態・通常設定・暗号化したWebhookを、GitHubから承認済みのCloudflareへ直接送信します。
-5. ローカルに `.cloudflare-migration/credential/` を作成し、`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で暗号文を取得します。`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` で復号してWorkers Secretに登録し、成功後に `node scripts/cloudflare-admin.js clear-credential` でCloudflareに一時保存した暗号文を削除します。Webhookの平文はファイル・コマンド引数・ログへ出しません。
+5. ローカルに `.cloudflare-migration/credential/` を作成し、`node scripts/cloudflare-admin.js credential .cloudflare-migration/credential/webhook.enc` で暗号文を取得します。`node scripts/import-cloudflare-webhook.js .cloudflare-migration/credential` で復号してWorkers Secretに登録し、成功後に `node scripts/cloudflare-admin.js clear-credential "実行ID:試行番号"` でCloudflareに一時保存した暗号文を削除します。引数には転送結果の `migrationId` を指定します。Webhookの平文はファイル・コマンド引数・ログへ出しません。
 6. `node scripts/cloudflare-admin.js mode shadow` で、通知なしの監視を検証します。
 7. GitHubの `health.yml` と `pages.yml` を一時的に無効化します。監視の未開始の待機実行を取り消し、進行中の実行は最後の状態保存まで完了させます。保存の成功、対応するキャッシュの存在、監視実行が残っていないことを確認します。
-8. Cloudflareを `mode paused` に戻します。`cloudflare-transfer.yml` の `cache_key` に、最後の監視実行が保存した正確なキー `nike-monitor-state-実行ID` を指定して再送信します。復元ログでそのキーとの一致を確認してください。**最後の通知済み状態**が反映されたことを確認し、再送されたWebhookの暗号文は `clear-credential` で削除します。公開 `status.json` だけでは通知済み状態は復元できません。
+8. Cloudflareを `mode paused` に戻します。`cloudflare-transfer.yml` の `cache_key` に、最後の監視実行が保存した正確なキー `nike-monitor-state-実行ID` を指定して再送信します。復元ログでそのキーとの一致を確認してください。**最後の通知済み状態**が反映されたことを確認し、再送されたWebhookの暗号文は `node scripts/cloudflare-admin.js clear-credential "実行ID:試行番号"` で削除します。引数は今回の転送結果の `migrationId` です。公開 `status.json` だけでは通知済み状態は復元できません。
 9. `mode active` でCloudflare通知を有効化し、更新・取得結果を確認します。GitHub variable `MONITOR_BACKEND=cloudflare` を設定し、`pages.yml` を再有効化して1回実行し、旧URLを移転案内にします。旧監視workflowはその後無効化できます。
 10. `health.yml` を再有効化します。これはCloudflareの更新停止を外側から検知する役割だけになり、旧GitHub監視を再起動しません。ソースコードとCIもGitHubに残します。
 
