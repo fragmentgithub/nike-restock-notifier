@@ -438,6 +438,131 @@ test('API代替取得で指定カラーが無ければ別カラーを採用し�
   assert.equal(result.product.styleColor, 'HQ4307-005');
 });
 
+test('両方のAPI代替経路で現行のスタイルカラーフィルターを送る', async () => {
+  const requestedPaths = [];
+  const result = await checkNikeStock(PRODUCT_URL, {
+    fetchImpl: async (input) => {
+      const url = new URL(input);
+      if (url.hostname === 'www.nike.com') return new Response('blocked', { status: 503 });
+      requestedPaths.push(url.pathname);
+      assert.deepEqual(url.searchParams.getAll('filter'), [
+        'marketplace(JP)', 'language(ja)',
+        'channelId(d9a5bc42-4b9c-4976-858a-f159cf99c647)',
+        'productInfo.merchProduct.styleColor(HQ4307-005)',
+      ]);
+      return url.pathname.includes('/threads/')
+        ? new Response('temporary failure', { status: 503 })
+        : Response.json(currentFeedPayload());
+    },
+  });
+  assert.deepEqual(requestedPaths, ['/product_feed/threads/v3', '/product_feed/rollup_threads/v2']);
+  assert.equal(result.source, 'nike-product-api');
+  assert.equal(result.inStock, true);
+});
+
+test('現行GTIN在庫を照合し、日本サイズを優先して通知対象を選ぶ', async () => {
+  const result = await checkWithFeed(currentFeedPayload(), '24');
+  assert.equal(result.ok, true);
+  assert.equal(result.availabilityState, 'available');
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.matchingSizes.map((size) => size.id), ['sku-24']);
+  assert.equal(result.sizes[0].label, '24 (US 6)');
+  assert.equal(result.sizes[0].localizedSize, '24 (US 6)');
+  assert.equal(result.sizes[0].nikeSize, '6');
+  assert.equal(result.sizes[1].available, false);
+  assert.equal(notificationDecision({ lastStockKey: '' }, result).shouldNotify, true);
+});
+
+test('旧SKU在庫形式でも日本サイズを使い、明示falseをHIGHより優先する', async () => {
+  const payload = currentFeedPayload();
+  const info = payload.objects[0].productInfo[0];
+  delete info.availableGtins;
+  info.availableSkus = [
+    { skuId: 'sku-24', available: true, level: 'LOW' },
+    { skuId: 'sku-25', available: false, level: 'HIGH' },
+  ];
+  const result = await checkWithFeed(payload, '24');
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.matchingSizes.map((size) => size.label), ['24 (US 6)']);
+  assert.equal(result.sizes[1].available, false);
+});
+
+test('GTINの欠落・違う配送方式や市場・矛盾した在庫は旧データで補わずunknownにする', async () => {
+  const base = currentFeedPayload().objects[0].productInfo[0].availableGtins[0];
+  const cases = [
+    [],
+    null,
+    [{ ...base, gtin: 'unrelated' }],
+    [{ ...base, method: 'PICKUP' }],
+    [{ ...base, method: undefined }],
+    [{ ...base, locationId: { type: 'merchGroup', id: 'US' } }],
+    [{ ...base, styleColor: 'HQ4307-003' }],
+    [{ ...base, available: undefined, level: 'ACTIVE' }],
+    [base, { ...base, available: false, level: 'OOS' }],
+  ];
+  for (const inventory of cases) {
+    const payload = currentFeedPayload();
+    const info = payload.objects[0].productInfo[0];
+    info.skus = info.skus.slice(0, 1);
+    info.availableGtins = inventory;
+    info.availableSkus = [{ skuId: 'sku-24', available: true, level: 'HIGH' }];
+    const result = await checkWithFeed(payload, '24');
+    assert.equal(result.availabilityState, 'unknown', JSON.stringify(inventory));
+    assert.equal(result.inStock, false);
+    const entry = { lastStockKey: '24 (US 6)', oosStreak: 1 };
+    const decision = notificationDecision(entry, result);
+    applyCheckState(entry, result, { ...decision, notified: false, webhookConfigured: true });
+    assert.equal(decision.shouldNotify, false);
+    assert.equal(entry.lastStockKey, '24 (US 6)');
+    assert.equal(entry.oosStreak, 1);
+  }
+});
+
+test('GTIN在庫はSKU順と無関係に照合し、配送方式・市場の違う在庫を混ぜない', async () => {
+  const payload = currentFeedPayload();
+  const inventory = payload.objects[0].productInfo[0].availableGtins;
+  inventory.reverse();
+  const unavailable = inventory[0];
+  inventory.push(
+    { ...unavailable, available: true, level: 'HIGH', method: 'PICKUP' },
+    { ...unavailable, available: true, level: 'HIGH', locationId: { type: 'merchGroup', id: 'US' } },
+  );
+  const result = await checkWithFeed(payload);
+  assert.equal(result.inStock, true);
+  assert.deepEqual(result.availableSizes.map((size) => size.id), ['sku-24']);
+});
+
+test('GTINの明示falseは残ったHIGHより優先し、全サイズの売切れを確定する', async () => {
+  const payload = currentFeedPayload();
+  payload.objects[0].productInfo[0].availableGtins[0].available = false;
+  payload.objects[0].productInfo[0].availableGtins[0].level = 'HIGH';
+  const result = await checkWithFeed(payload);
+  assert.equal(result.availabilityState, 'out-of-stock');
+  assert.equal(result.inStock, false);
+  assert.deepEqual(result.availableSizes, []);
+});
+
+test('GTINに残存在庫があっても商品全体の販売終了・発売前を優先する', async () => {
+  const cases = [
+    [{ merchProduct: { status: 'INACTIVE' } }, 'out-of-stock'],
+    [{ merchProduct: { statusModifier: 'OUT_OF_STOCK_SEARCHABLE' } }, 'out-of-stock'],
+    [{ availability: { available: false } }, 'out-of-stock'],
+    [{ merchProduct: { statusModifier: 'COMING_SOON' } }, 'coming-soon'],
+    [{ merchProduct: { commerceStartDate: '2099-08-01T01:00:00Z' } }, 'coming-soon'],
+  ];
+  for (const [overrides, expected] of cases) {
+    const payload = currentFeedPayload();
+    const info = payload.objects[0].productInfo[0];
+    info.merchProduct = { ...info.merchProduct, ...overrides.merchProduct };
+    if (overrides.availability) info.availability = overrides.availability;
+    const result = await checkWithFeed(payload);
+    assert.equal(result.availabilityState, expected, JSON.stringify(overrides));
+    assert.equal(result.inStock, false);
+    assert.deepEqual(result.availableSizes, []);
+    assert.equal(notificationDecision({ lastStockKey: '' }, result).shouldNotify, false);
+  }
+});
+
 test('API代替取得でも発売日時と発売前状態を維持する', async () => {
   const apiPayload = {
     objects: [{
@@ -658,6 +783,42 @@ test('APIでも商品全体の在庫なし表示をSKUの残存在庫より優�
 
 async function checkWithNextData(pageProps, followupResponses = []) {
   return checkWithResponses([nextDataResponse(pageProps), ...followupResponses]);
+}
+
+async function checkWithFeed(payload, sizeFilters = '') {
+  return checkNikeStock(PRODUCT_URL, {
+    sizeFilters,
+    fetchImpl: async (url) => String(url).startsWith('https://www.nike.com/')
+      ? new Response('blocked', { status: 503 })
+      : Response.json(payload),
+  });
+}
+
+// Reduced from the current JP feed: GTIN inventory and country-specific labels.
+function currentFeedPayload() {
+  return { objects: [{ productInfo: [{
+    merchProduct: { styleColor: 'HQ4307-005', status: 'ACTIVE' },
+    skus: [
+      {
+        id: 'sku-24', gtin: '00198959737556', nikeSize: '6',
+        countrySpecifications: [
+          { country: 'US', localizedSize: '6' },
+          { country: 'JP', localizedSize: '24 (US 6)' },
+        ],
+      },
+      {
+        id: 'sku-25', gtin: '00198959736481', nikeSize: '7',
+        countrySpecifications: [{ country: 'JP', localizedSize: '25 (US 7)' }],
+      },
+    ],
+    availableGtins: [
+      { gtin: '00198959737556', available: true, level: 'LOW' },
+      { gtin: '00198959736481', available: false, level: 'OOS' },
+    ].map((inventory) => ({
+      ...inventory, method: 'SHIP', styleColor: 'HQ4307-005',
+      locationId: { type: 'merchGroup', id: 'JP' },
+    })),
+  }] }] };
 }
 
 function nextDataScript(pageProps) {

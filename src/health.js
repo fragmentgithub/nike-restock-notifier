@@ -1,18 +1,30 @@
 export const DEFAULT_STATUS_PAGE_URL = 'https://nike-restock-viewer.only-this-moment.workers.dev/';
 
 export function evaluateWorkerHealth(status, { now = Date.now() } = {}) {
-  const updatedAt = validIsoDate(status?.lastCompletedAt);
-  const ageMinutes = updatedAt ? Math.max(0, Math.floor((now - Date.parse(updatedAt)) / 60000)) : null;
+  const monitor = evaluateWorkerMonitorHealth(status, { now });
   let reason = '';
   if (status?.mode !== 'active') reason = '本番監視が停止または検証モードになっています';
   else if (status.webhookConfigured !== true) reason = 'Discord通知先が設定されていません';
-  else if (!updatedAt || Date.parse(updatedAt) > now + 300000) reason = '監視の完了時刻を確認できません';
-  else if (status.monitorHealthy === false || !Number.isFinite(Date.parse(status.nextAlarmAt || '')) ||
-      Date.parse(status.nextAlarmAt) < now - 120000) reason = '監視処理または次回起動の予約に異常があります';
+  else if (!monitor.healthy) reason = monitor.reason;
   else if (status.backupHealthy !== true) reason = Number(status.backupFailureStreak) > 0
     ? '監視データのバックアップに継続的な失敗があります'
     : '監視データのバックアップが24時間以上成功していません';
   else if (status.healthy !== true) reason = '監視処理に異常があります';
+  return { ...monitor, healthy: !reason, reason };
+}
+
+export function evaluateWorkerMonitorHealth(status, { now = Date.now() } = {}) {
+  const updatedAt = validIsoDate(status?.lastCompletedAt);
+  const ageMinutes = updatedAt ? Math.max(0, Math.floor((now - Date.parse(updatedAt)) / 60000)) : null;
+  const staleMinutes = Math.min(7 * 24 * 60 + 5, Math.max(15, Number(status?.completionStaleMinutes) || 15));
+  let reason = '';
+  if (!updatedAt || Date.parse(updatedAt) > now + 300000) reason = '監視の完了時刻を確認できません';
+  else if (now - Date.parse(updatedAt) > staleMinutes * 60000) reason = `監視処理が ${ageMinutes} 分完了していません`;
+  else if (status.checksHealthy === false) reason = '有効な監視商品の取得が連続して失敗しています';
+  else if (status.notificationsHealthy === false) reason = 'Discord通知の送信が連続して失敗しています';
+  else if (status.monitorHealthy === false || status.lastError ||
+      (status.running !== true && (!Number.isFinite(Date.parse(status.nextAlarmAt || '')) ||
+      Date.parse(status.nextAlarmAt) < now - 120000))) reason = '監視処理または次回起動の予約に異常があります';
   return { healthy: !reason, reason, updatedAt, ageMinutes };
 }
 

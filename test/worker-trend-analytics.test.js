@@ -84,6 +84,65 @@ test('coverage aggregation handles whole JST weeks without changing weekday/hour
   }
 });
 
+test('hour and rolling-window boundaries retain positive observation denominators', async (t) => {
+  const start = Date.parse('2026-09-18T00:59:59.000Z');
+  const { documents, setNow } = fixture(t, start);
+  const save = async (at) => {
+    setNow(at);
+    await documents.commit({ state: { history: [] } }, {
+      observation: observation(FIRST, at, 'out_of_stock'),
+    });
+  };
+  await save(start);
+  await save(start + 2 * MINUTE);
+  let analytics = documents.getTrends({ days: 7 }).analytics;
+  const partialHour = analytics.weekdayHours.cells.find((cell) => cell.weekday === 5 && cell.hour === 9);
+  assert.equal(partialHour.observedProductHours, 1000 / 3600000);
+  assert.equal(partialHour.restockEvents, 0);
+  assert.equal(partialHour.ratePer100ProductHours, 0);
+  const unobserved = analytics.weekdayHours.cells.find((cell) => cell.weekday === 0 && cell.hour === 0);
+  assert.equal(unobserved.observedProductHours, null);
+  assert.equal(unobserved.ratePer100ProductHours, null);
+
+  // The earlier segment contributes just one second to the previous 30 days.
+  // A new segment contributes one millisecond to the selected 7-day coverage.
+  const now = start + 30 * DAY + 1000;
+  await save(now - 1);
+  await save(now);
+  analytics = documents.getTrends({ days: 7 }).analytics;
+  assert.equal(analytics.coverage.observedProductHours, 1 / 3600000);
+  assert.equal(analytics.comparison.previous.observedProductHours, 1000 / 3600000);
+  assert.equal(analytics.comparison.previous.ratePer100ProductHours, 0);
+  assert.equal(analytics.comparison.status, 'insufficient');
+  for (const value of [...analytics.weekdayHours.cells, analytics.comparison.previous, analytics.comparison.current]) {
+    assert.ok(value.observedProductHours === null || value.observedProductHours > 0);
+    assert.equal(value.ratePer100ProductHours === null, value.observedProductHours === null);
+  }
+});
+
+test('comparison minimum coverage uses actual duration before display rounding', (t) => {
+  const now = Date.parse('2026-09-18T00:00:00Z');
+  const start = now - 60 * DAY;
+  const { documents, database } = fixture(t, now);
+  documents.getTrends();
+  database.prepare('UPDATE monitor_analysis_meta SET started_at = ? WHERE id = 1').run(start);
+  setVerifiedFrom(documents, database, start);
+  for (const at of [start, now - 30 * DAY]) {
+    database.prepare('INSERT INTO monitor_product_coverage VALUES (?, ?, ?)').run(FIRST, at, at + DAY - 1);
+    for (let index = 1; index <= 3; index++) {
+      const detectedAt = at + index * MINUTE;
+      database.prepare(`INSERT INTO monitor_sellout_episodes
+        (style_color, started_at, restock_lower_at, last_in_stock_at) VALUES (?, ?, ?, ?)`)
+        .run(FIRST, detectedAt, detectedAt - MINUTE, detectedAt);
+    }
+  }
+  const comparison = documents.getTrends({ days: 7 }).analytics.comparison;
+  assert.equal(comparison.previous.observedProductHours, 24);
+  assert.equal(comparison.current.observedProductHours, 24);
+  assert.equal(comparison.status, 'insufficient');
+  assert.equal(comparison.changePercent, null);
+});
+
 test('failures and long gaps break coverage instead of being counted as monitored time', async (t) => {
   const start = Date.parse('2026-09-06T00:00:00Z');
   const { documents, setNow } = fixture(t, start);

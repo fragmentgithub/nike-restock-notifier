@@ -5,6 +5,7 @@ import { MONITOR_MODES, scrubOutput, selectConfig, validateImport, validateMigra
 import { boundedFetch } from './worker-network.js';
 import { probeNike } from './worker-probe.js';
 import { MonitorBackup } from './worker-backup.js';
+import { evaluateWorkerMonitorHealth } from './health.js';
 
 const RECOVERY_DELAY_MS = 120000;
 const BACKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -59,6 +60,7 @@ export class MonitorController {
     const control = this.control();
     const status = this.documents.read('status') || this.engine(control).status();
     const alarm = await this.ctx.storage.getAlarm();
+    const monitor = this.monitorHealth(control, status, alarm);
     return this.safe({
       ...status,
       nextCheckAt: control.mode === 'paused' ? null : alarm ? new Date(alarm).toISOString() : status.nextCheckAt,
@@ -67,7 +69,7 @@ export class MonitorController {
         provider: 'cloudflare', mode: control.mode, running: this.running,
         importedAt: control.importedAt || null,
         lastTickAt: control.lastCompletedAt || null,
-        lastError: control.lastError || null,
+        lastError: control.lastError || monitor.reason || null,
       },
     });
   }
@@ -80,8 +82,9 @@ export class MonitorController {
     const control = this.control();
     const alarm = await this.ctx.storage.getAlarm();
     const now = this.now();
-    const schedulingHealthy = this.running || (Number.isFinite(alarm) && alarm >= now - RECOVERY_DELAY_MS);
-    const monitorHealthy = control.mode === 'paused' || (schedulingHealthy && !control.lastError);
+    const status = this.documents.read('status', {});
+    const monitor = this.monitorHealth(control, status, alarm);
+    const monitorHealthy = monitor.healthy;
     let lastBackupAt = validBackupDate(control.lastBackupAt);
     let backupFailureStreak = failureStreak(control.backupFailureStreak);
     let lastBackupError = typeof control.lastBackupError === 'string' ? control.lastBackupError : null;
@@ -103,17 +106,42 @@ export class MonitorController {
     return {
       healthy: monitorHealthy && backupHealthy,
       monitorHealthy,
+      checksHealthy: monitor.checksHealthy,
+      notificationsHealthy: monitor.notificationsHealthy,
+      completionStaleMinutes: monitor.completionStaleMinutes,
       backupHealthy,
       mode: control.mode, running: this.running,
       webhookConfigured: Boolean(normalizeDiscordWebhook(this.env.DISCORD_WEBHOOK)),
       lastStartedAt: control.lastStartedAt || null,
       lastCompletedAt: control.lastCompletedAt || null,
       nextAlarmAt: alarm ? new Date(alarm).toISOString() : null,
-      lastError: control.lastError || null,
+      lastError: control.lastError || monitor.reason || null,
       lastBackupAt,
       backupFailureStreak,
       lastBackupError,
     };
+  }
+
+  monitorHealth(control, status, alarm) {
+    const activeProducts = Number(status.metrics?.activeProducts ?? 1);
+    const config = status.config || {};
+    // Allow the ten-minute fleet backoff, long configured intervals and complete
+    // product sweeps. An entirely paused fleet legitimately waits for discovery
+    // or its next periodic reprobe instead of checking every few minutes.
+    const completionStaleMinutes = activeProducts > 0
+      ? Math.max(15, Math.ceil((Number(config.intervalSeconds) || 120) / 60 +
+        activeProducts * (Number(config.productCheckDelayMs) || 0) / 60000 + 5))
+      : Math.max(15, Math.min(Number(config.discoveryIntervalHours) || 6,
+        Number(status.metrics?.pausedProducts) > 0 ? Number(config.pausedRecheckHours) || 24 : Infinity) * 60 + 5);
+    const checksHealthy = control.mode === 'paused' || status.health?.checksHealthy !== false;
+    const notificationsHealthy = control.mode !== 'active' || status.health?.notificationsHealthy !== false;
+    const result = control.mode === 'paused' ? { healthy: true, reason: '' }
+      : evaluateWorkerMonitorHealth({
+        lastCompletedAt: control.lastCompletedAt, lastError: control.lastError,
+        nextAlarmAt: Number.isFinite(alarm) ? new Date(alarm).toISOString() : null,
+        running: this.running, checksHealthy, notificationsHealthy, completionStaleMinutes,
+      }, { now: this.now() });
+    return { ...result, checksHealthy, notificationsHealthy, completionStaleMinutes };
   }
 
   async exportState() {

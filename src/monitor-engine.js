@@ -174,9 +174,13 @@ export function createMonitorEngine({
         message: `${entry.styleColor} の監視処理でエラー: ${safeError.message}`,
         at: checkedAt, result: null,
       });
-      outcome = { ok: false, notified: false };
+      outcome = { ok: false, observationHealthy: false, notified: false };
     }
     const attempts = countedAsActive ? [{ styleColor: entry.styleColor, ok: outcome.ok }] : [];
+    // Successfully parsing a product is not enough when inventory remains unknown.
+    // Keep transport metrics/backoff unchanged; this counter measures usable checks.
+    entry.checkFailureStreak = outcome.observationHealthy
+      ? 0 : Math.min(1000000, Math.max(0, Number(entry.checkFailureStreak) || 0) + 1);
     const failure = nextFailureWindowState(state.consecutiveFailedCycles, state.failureWindow, {
       attempts,
       activeProducts: activeProducts.map((product) => product.styleColor),
@@ -297,7 +301,7 @@ export function createMonitorEngine({
       state.checkSamples = state.checkSamples.filter(
         (sample) => sample?.styleColor !== entry.styleColor,
       );
-      return { notified: false, ok: true };
+      return { notified: false, ok: true, observationHealthy: true };
     }
     const styleColor = result.product?.styleColor || entry.styleColor;
     updateUpcomingState(entry, result, { now: Date.parse(checkedAt) });
@@ -408,6 +412,7 @@ export function createMonitorEngine({
           imageUrl: result.product.imageUrl,
         });
         notified = true;
+        state.notificationFailureStreak = 0;
         entry.pendingNotification = null;
         pushEvent({
           id: `notify-${clock()}-${styleColor}`,
@@ -417,6 +422,8 @@ export function createMonitorEngine({
           result: null,
         });
       } catch (error) {
+        state.notificationFailureStreak = Math.min(1000000,
+          Math.max(0, Number(state.notificationFailureStreak) || 0) + 1);
         pushEvent({
           id: `notify-error-${clock()}-${styleColor}`,
           type: 'error',
@@ -448,7 +455,7 @@ export function createMonitorEngine({
       };
     }
 
-    return { notified, ok: result.ok };
+    return { notified, ok: result.ok, observationHealthy: result.ok && result.availabilityState !== 'unknown' };
   }
 
   function recordCatalogReprobeOutcome(entry, ok) {
@@ -575,6 +582,7 @@ export function createMonitorEngine({
           stockHistory: Array.isArray(product.stockHistory) ? product.stockHistory.slice(0, 60) : [],
           lastResult: product.lastResult || null,
           lastRuntimeError: product.lastRuntimeError || null,
+          checkFailureStreak: Math.max(0, Number(product.checkFailureStreak) || 0),
         };
       } catch {
         // 壊れたキャッシュ項目は無視する。
@@ -697,6 +705,10 @@ export function createMonitorEngine({
     if (config.productConfigError) {
       monitorErrors.unshift(`商品別設定: ${config.productConfigError}`);
     }
+    const activeProducts = monitorableProducts().filter((product) => !product.pausedAt);
+    const checksHealthy = !activeProducts.length ||
+      activeProducts.some((product) => Number(product.checkFailureStreak || 0) < 2);
+    const notificationsHealthy = Number(state.notificationFailureStreak || 0) < 2;
     state.lastErrors = monitorErrors;
     state.lastError = monitorErrors[0] || null;
 
@@ -775,6 +787,7 @@ export function createMonitorEngine({
         consecutiveFailedCycles: state.consecutiveFailedCycles,
       },
       history,
+      health: { checksHealthy, notificationsHealthy },
       lastResult,
       errors: monitorErrors,
       lastError: state.lastError,

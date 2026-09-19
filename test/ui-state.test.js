@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setImmediate } from 'node:timers/promises';
+import { DatabaseSync } from 'node:sqlite';
+import { MonitorStorage } from '../src/worker-storage.js';
 
 const NOW = Date.parse('2026-09-06T03:00:00Z');
 const FIRST = 'HQ4307-001';
@@ -182,6 +184,54 @@ test('a controller failure in meta is shown immediately and duplicate messages c
   assert.match(app.node('runStatus').className, /error/);
   assert.equal(app.node('checkStatus').textContent, '1件エラー');
   assert.equal(app.node('monitorErrorHint').textContent, message);
+});
+
+test('persistent delivery failures stay visible through successful stock checks and clear on recovery', async (t) => {
+  const message = 'Discord通知の送信が連続して失敗しています';
+  const app = await loadApp(t, state({ meta: { mode: 'active', lastError: message } }));
+  assert.equal(app.node('runStatus').textContent, '監視エラー');
+  assert.equal(app.node('checkStatus').textContent, '1件エラー');
+  assert.equal(app.node('monitorErrorHint').textContent, message);
+  await app.refresh(state({ meta: { mode: 'active', lastError: message }, products: [product()] }));
+  assert.equal(app.node('runStatus').textContent, '監視エラー');
+  await app.refresh(state({ meta: { mode: 'active', lastError: null } }));
+  assert.equal(app.node('runStatus').textContent, '自動監視中');
+  assert.equal(app.node('monitorErrorHint').hidden, true);
+});
+
+test('real archive observations crossing an hour boundary render even with one second in a cell', async (t) => {
+  const database = new DatabaseSync(':memory:');
+  t.after(() => database.close());
+  let now = Date.parse('2026-09-06T00:59:59Z');
+  const storage = {
+    sql: { exec(sql, ...args) {
+      const rows = database.prepare(sql).all(...args);
+      return { toArray: () => rows };
+    } },
+    transactionSync(callback) {
+      database.exec('BEGIN');
+      try { const result = callback(); database.exec('COMMIT'); return result; }
+      catch (error) { database.exec('ROLLBACK'); throw error; }
+    },
+    sync: async () => {},
+  };
+  const documents = new MonitorStorage(storage, { now: () => now });
+  const observe = () => documents.commit({ state: { history: [] } }, {
+    observation: { styleColor: FIRST, observedAt: new Date(now).toISOString(),
+      availability: 'out_of_stock', expectedIntervalSeconds: 120 },
+  });
+  await observe();
+  now += 120000;
+  await observe();
+  const app = await loadApp(t, state(), { trends: (filters) => documents.getTrends(filters) });
+  assert.equal(app.node('trendTotal').textContent, '0件');
+  assert.equal(app.node('trendChart').children.length, 24);
+  assert.equal(app.node('trendHeatmapBody').children.length, 7);
+  assert.doesNotMatch(app.node('trendMessage').textContent, /応答形式が不正|取得できません/);
+  const oneSecondCell = app.node('trendHeatmapBody').children[0].children[10];
+  assert.notEqual(oneSecondCell.className, 'unobserved');
+  assert.equal(oneSecondCell.children[0].textContent, '0件');
+  assert.equal(oneSecondCell.children[1].textContent, '0.0');
 });
 
 test('malformed refreshes preserve the complete prior snapshot instead of partially changing it', async (t) => {

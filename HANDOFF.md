@@ -4,7 +4,21 @@
 
 **ページは本人限定。Cloudflare上でPCがオフでも閲覧でき、長期リストックトレンドを確認する。** 過度な作り込みを避け、監視・通知ロジックの正確さと効率を優先する。一般公開画面・GitHub Pages・移転案内を復活させない。
 
-## 最新変更：在庫確認の正確化、検証済みトレンド、バックアップ監視
+## 最新変更（2026-09-19）：代替API・異常検知・集計境界の修正
+
+3件の指摘を修正し、監視Worker version `7ce10b52-7ba3-4eec-8487-8fd4d69a7425` に反映済み。保存先・migration・本人限定の認証構成は維持している。画面資産に変更はなく、集計とエラー表示用データは監視Workerの修正で対応した。
+
+- `src/nike.js`: feedのフィルターを `productInfo.merchProduct.styleColor(...)` へ修正。現行の `availableGtins` をSKUのGTINで照合し、配送方式・市場・カラーの違う在庫、欠落、未知状態、矛盾した重複を通知へ使わない。旧 `availableSkus` も維持。日本の `countrySpecifications.localizedSize` を表示とサイズ指定の照合へ利用する。商品全体の発売前・販売終了・明示的在庫なしを優先する。商品ページだけを失敗させた読み取り検証で、実Nike APIの2商品がHTTP 200、日本サイズ、適切な非販売状態を返した。
+- `src/monitor-engine.js` / `src/worker-monitor.js` / `src/health.js`: 有効・非休止の全商品で各2回連続の取得失敗または在庫判定不能を異常とする。Discordの連続送信失敗2回も別に保存し、実送信成功で解除。`checksHealthy` / `notificationsHealthy` / `completionStaleMinutes` をhealthへ追加した。最終完了からの遅延も検査し、通常15分以上、全商品休止時は探索・再確認間隔を考慮する。本人ページには既存の `meta.lastError` で一般化した理由を表示し、healthへ商品情報は返さない。
+- `src/worker-trend-analytics.js`: 正の観測時間が表示用の丸めで0になる場合は元の正数を保持する。時間帯セル・coverage・30日比較を統一し、未観測の `null` と観測済み0件を区別。比較の最低24商品時間は丸め前の実時間で検査する。
+
+334テスト、監視Workerと閲覧Workerのdry-runビルド、実Workerdでの本人認証・読み取り専用接続・SQLite1万件・別DOバックアップ復元が成功。全件取得失敗、在庫不明、通知失敗、再起動後の異常保持、復旧、全商品休止時の待機、時刻境界の1秒・1ミリ秒、実DBから画面表示までの回帰テストを追加した。
+
+反映前の追加バックアップは `2026-09-19/20260919T013125733-53421fd6-606e-40ec-a493-f61cf6b8d1ab`。非公開の反映前後ファイルは `.cloudflare-migration/fix-20260919-*`。10商品の通知済みキー・商品別履歴、全体履歴48件、長期保存24件（検証済み5件、旧方式19件）が反映前後で一致した。2026-09-19 10:38 JSTに新コードによる自動取得とhealthの新項目の保存を確認。healthy/active、3商品active・7商品paused、取得成功率99.4%、連続失敗0、バックアップ正常。監視Workerの未認証 `/` は404、`/status.json`・`/healthz` は401、閲覧Worker `/`・`/api/trends` はAccessログインへ302。
+
+本人の実ログイン後の表示とDiscordの実着信は今回未確認。通知の障害・復旧は隔離したテストで検証し、テスト通知は送っていない。
+
+## 前回変更（2026-09-05）：在庫確認の正確化、検証済みトレンド、バックアップ監視
 
 閲覧URLは `https://nike-restock-viewer.only-this-moment.workers.dev`。Cloudflare Accessの本人メール限定ポリシーとメールOTPで認証する。本人の実メールアドレスをリポジトリに記載しない。PCを停止してもCloudflareの監視・保存・閲覧は継続する。
 

@@ -36,6 +36,31 @@ test('private Worker health reports persisted backup failure and stale backup st
   assert.match(evaluateWorkerHealth({ ...base, backupHealthy: false, backupFailureStreak: 0 }, { now }).reason, /24時間以上/);
 });
 
+test('private Worker health rejects stale completion even when alarms and backups look healthy', () => {
+  const now = Date.parse('2026-09-19T00:00:00Z');
+  const base = { mode: 'active', webhookConfigured: true, healthy: true,
+    monitorHealthy: true, backupHealthy: true,
+    lastCompletedAt: new Date(now - 7 * 86400000).toISOString(),
+    nextAlarmAt: new Date(now + 60000).toISOString() };
+  const stale = evaluateWorkerHealth(base, { now });
+  assert.equal(stale.healthy, false);
+  assert.match(stale.reason, /10080 分完了していません/);
+  const waiting = { ...base, lastCompletedAt: new Date(now - 3 * 60 * 60000).toISOString(),
+    completionStaleMinutes: 365 };
+  assert.equal(evaluateWorkerHealth(waiting, { now }).healthy, true);
+  assert.equal(evaluateWorkerHealth({ ...base, lastCompletedAt: new Date(now - 15 * 60000).toISOString() }, { now }).healthy, true);
+  assert.equal(evaluateWorkerHealth({ ...base, lastCompletedAt: new Date(now - 15 * 60000 - 1).toISOString() }, { now }).healthy, false);
+});
+
+test('private Worker health reports sustained retrieval and notification failures without product details', () => {
+  const now = Date.parse('2026-09-19T00:00:00Z');
+  const base = { mode: 'active', webhookConfigured: true, healthy: false,
+    monitorHealthy: false, backupHealthy: true,
+    lastCompletedAt: new Date(now).toISOString(), nextAlarmAt: new Date(now + 60000).toISOString() };
+  assert.match(evaluateWorkerHealth({ ...base, checksHealthy: false }, { now }).reason, /取得が連続して失敗/);
+  assert.match(evaluateWorkerHealth({ ...base, notificationsHealthy: false }, { now }).reason, /Discord通知の送信が連続/);
+});
+
 test('health notification links only to a validated private viewer root', () => {
   assert.equal(resolveStatusPageUrl(undefined), DEFAULT_STATUS_PAGE_URL);
   assert.equal(

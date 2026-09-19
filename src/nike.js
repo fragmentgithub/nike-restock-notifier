@@ -362,7 +362,7 @@ function buildProductFeedUrls(productRef) {
   query.append('filter', `marketplace(${productRef.marketplace})`);
   query.append('filter', `language(${productRef.language})`);
   query.append('filter', `channelId(${NIKE_CHANNEL_ID})`);
-  query.append('filter', `styleColor(${productRef.styleColor})`);
+  query.append('filter', `productInfo.merchProduct.styleColor(${productRef.styleColor})`);
 
   return [
     `https://api.nike.com/product_feed/threads/v3?${query.toString()}`,
@@ -391,7 +391,7 @@ function parseProductFeed(payload, productRef, sizeFilters) {
   const product = buildProductFromFeed(matchingInfo, productRef);
   const releaseAt = nextProductReleaseAt(matchingInfo);
   const unavailableReason = feedProductUnavailableReason(matchingInfo, releaseAt);
-  const sizes = buildSizesFromFeed(matchingInfo).map((size) => ({
+  const sizes = buildSizesFromFeed(matchingInfo, productRef).map((size) => ({
     ...size,
     available: unavailableReason ? false : size.available,
   }));
@@ -429,6 +429,7 @@ function feedProductUnavailableReason(info, releaseAt) {
   const releaseTimestamp = Date.parse(releaseAt || '');
   if (Number.isFinite(releaseTimestamp) && releaseTimestamp > Date.now()) return 'coming-soon';
   if (/OUT_OF_STOCK|SOLD_OUT|UNAVAILABLE|(?:^|\s)INACTIVE(?:\s|$)/i.test(markers)) return 'out-of-stock';
+  if (info?.availability?.available === false || info?.availability?.available === 'false') return 'out-of-stock';
   return null;
 }
 
@@ -454,8 +455,9 @@ function buildProductFromFeed(info, productRef) {
   };
 }
 
-function buildSizesFromFeed(info) {
+function buildSizesFromFeed(info, productRef) {
   const skus = asArray(info?.skus);
+  const hasGtinInventory = Object.hasOwn(info || {}, 'availableGtins');
   const hasAvailabilityData = Array.isArray(info?.availableSkus);
   const availableSkus = asArray(info?.availableSkus);
   const availableBySkuId = new Map();
@@ -468,29 +470,63 @@ function buildSizesFromFeed(info) {
 
   return skus.map((sku) => {
     const availableSku = availableBySkuId.get(String(sku?.id || ''));
-    const level = String(availableSku?.level || availableSku?.inventoryLevel || '').toUpperCase();
-    const availability = availableSku
-      ? inventoryAvailability(availableSku.available, level)
-      : hasAvailabilityData ? false : null;
+    const legacyLevel = String(availableSku?.level || availableSku?.inventoryLevel || '').toUpperCase();
+    // Current feeds describe inventory by GTIN. If this representation is present,
+    // an absent or ambiguous match cannot be replaced with stale legacy SKU data.
+    const { availability, level } = hasGtinInventory
+      ? feedGtinInventory(info.availableGtins, sku, productRef)
+      : {
+          availability: availableSku
+            ? inventoryAvailability(availableSku.available, legacyLevel)
+            : hasAvailabilityData ? false : null,
+          level: legacyLevel,
+        };
     const available = availability === true;
+    const countrySpecification = asArray(sku?.countrySpecifications).find(
+      (specification) => String(specification?.country || '').toUpperCase() === productRef.marketplace,
+    );
+    const localizedSize = firstPresent([countrySpecification?.localizedSize, sku?.localizedSize]);
     const label = firstPresent([
-      sku?.localizedSize,
+      localizedSize,
       sku?.nikeSize,
       sku?.size,
-      sku?.countrySpecifications?.[0]?.localizedSize,
       sku?.id,
     ]);
 
     return {
       id: sku?.id || '',
       label,
-      localizedSize: sku?.localizedSize || '',
+      localizedSize,
       nikeSize: sku?.nikeSize || '',
       size: sku?.size || '',
       available,
       level: availability === null ? 'UNKNOWN' : available ? level || 'AVAILABLE' : 'OOS',
     };
   });
+}
+
+function feedGtinInventory(inventory, sku, productRef) {
+  const gtin = String(sku?.gtin || '').trim();
+  const matches = gtin ? asArray(inventory).filter((entry) => {
+    if (String(entry?.gtin || '').trim() !== gtin || entry?.method !== 'SHIP') return false;
+    if (entry.styleColor && String(entry.styleColor).toUpperCase() !== productRef.styleColor) return false;
+    if (entry.locationId && (
+      entry.locationId.type !== 'merchGroup' ||
+      String(entry.locationId.id || '').toUpperCase() !== productRef.marketplace
+    )) return false;
+    return true;
+  }) : [];
+  const unknown = { availability: null, level: 'UNKNOWN' };
+  if (!matches.length) return unknown;
+  const observations = matches.map((entry) => {
+    const level = String(entry.level || entry.inventoryLevel || '').toUpperCase();
+    return { availability: inventoryAvailability(entry.available, level), level };
+  });
+  const first = observations[0];
+  if (first.availability === null || observations.some((entry) => entry.availability !== first.availability)) {
+    return unknown;
+  }
+  return first;
 }
 
 function parseProductPage(html, productRef, sizeFilters, nextData) {

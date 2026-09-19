@@ -235,14 +235,14 @@ export class TrendAnalytics {
       WHERE occurred_at >= ? AND occurred_at <= ?${selection}`, ...gapBindings).toArray()[0].count;
     const weekdayHours = { cells: cells.map(({ weekday, hour, restockEvents: events, observedMs: ms }) => ({
       weekday, hour, restockEvents: events,
-      observedProductHours: ms > 0 ? round(ms / HOUR_MS, 3) : null,
+      observedProductHours: observedHours(ms),
       ratePer100ProductHours: ms > 0 ? round(events * 100 * HOUR_MS / ms, 3) : null,
     })) };
     const comparison = this.comparison(style, now, recordingStartedAt);
     return {
       coverage: {
         recordingStartedAt: new Date(recordingStartedAt).toISOString(),
-        observedProductHours: observedMs > 0 ? round(observedMs / HOUR_MS, 3) : null,
+        observedProductHours: observedHours(observedMs),
         reliableSegments: Math.min(segments.length, 200000),
         excludedGaps,
         segmentsTruncated,
@@ -281,7 +281,7 @@ export class TrendAnalytics {
       periodMetric(Math.max(currentStart, recordingStartedAt), now, segments, counts.current_events || 0),
     ];
     const [previous, current] = periods;
-    const sufficient = periods.every((period) => period.observedProductHours >= MIN_COMPARISON_HOURS &&
+    const sufficient = periods.every((period) => period._observedMs >= MIN_COMPARISON_HOURS * HOUR_MS &&
       period.events >= MIN_COMPARISON_EVENTS);
     let status = 'insufficient';
     let changePercent = null;
@@ -395,13 +395,20 @@ function periodMetric(start, end, segments, eventCount) {
     total + Math.max(0, Math.min(end, segment.end_at) - Math.max(start, segment.start_at)), 0);
   const hours = observedMs / HOUR_MS;
   return {
-    events: eventCount, observedProductHours: observedMs > 0 ? round(hours, 3) : null,
+    events: eventCount, observedProductHours: observedHours(observedMs),
     ratePer100ProductHours: observedMs > 0 ? round(eventCount * 100 / hours, 3) : null,
     _observedMs: observedMs,
   };
 }
 function emptyPeriod(events) {
   return { events, observedProductHours: null, ratePer100ProductHours: null, _observedMs: 0 };
+}
+function observedHours(milliseconds) {
+  if (milliseconds <= 0) return null;
+  const hours = milliseconds / HOUR_MS;
+  // A clipped hour/window can contain only milliseconds. Keep its positive
+  // denominator rather than rounding it to zero and invalidating the UI data.
+  return round(hours, 3) || hours;
 }
 function percentile(sorted, point) {
   if (!sorted.length) return null;
